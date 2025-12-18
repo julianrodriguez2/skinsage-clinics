@@ -1,0 +1,15 @@
+.DS_Store
+node_modules
+dist
+build
+.turbo
+.expo
+.idea
+.vscode
+*.log
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+coverage
+tmp
+temp

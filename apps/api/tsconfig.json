@@ -3,9 +3,11 @@
   "compilerOptions": {
     "module": "CommonJS",
     "outDir": "dist",
-    "rootDir": "src"
+    "rootDir": "src",
+    "types": ["node", "vitest"]
   },
   "include": [
-    "src"
+    "src",
+    "tests"
   ]
 }

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { AuthenticatedRequest, requireAuth, requireRole } from "../middleware/auth";
 import {
   createPatient,
   getPatient,
@@ -16,7 +17,9 @@ import {
 
 const router = Router();
 
-router.get("/", (req, res) => {
+router.use(requireAuth());
+
+router.get("/", requireRole(["admin", "clinician", "staff"]), (req, res) => {
   const status =
     req.query.status === "inactive" || req.query.status === "active"
       ? (req.query.status as "inactive" | "active")
@@ -28,7 +31,7 @@ router.get("/", (req, res) => {
   res.json({ data: patients });
 });
 
-router.post("/", (req, res) => {
+router.post("/", requireRole(["admin", "clinician", "staff"]), (req, res) => {
   const parsed = patientCreateSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
@@ -37,7 +40,7 @@ router.post("/", (req, res) => {
   res.status(201).json({ data: patient });
 });
 
-router.post("/join", (req, res) => {
+router.post("/join", requireRole(["patient"]), (req, res) => {
   const parsed = patientJoinSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
@@ -46,20 +49,43 @@ router.post("/join", (req, res) => {
   res.status(201).json({ data: patient });
 });
 
-router.get("/:id", (req, res) => {
+router.get(
+  "/:id",
+  requireRole(["admin", "clinician", "staff", "patient"]),
+  (req, res) => {
+    const auth = req as AuthenticatedRequest;
+    if (auth.user?.role === "patient" && auth.user.patientId !== req.params.id) {
+      return res.status(403).json({ error: "Forbidden: patient mismatch" });
+    }
   const patient = getPatient(req.params.id);
   if (!patient) return res.status(404).json({ error: "Patient not found" });
   res.json({ data: { ...patient, needsScan: patientNeedsScan(patient.id) } });
-});
+  }
+);
 
-router.get("/:id/scans", (req, res) => {
+router.get(
+  "/:id/scans",
+  requireRole(["admin", "clinician", "staff", "patient"]),
+  (req, res) => {
+    const auth = req as AuthenticatedRequest;
+    if (auth.user?.role === "patient" && auth.user.patientId !== req.params.id) {
+      return res.status(403).json({ error: "Forbidden: patient mismatch" });
+    }
   const patient = getPatient(req.params.id);
   if (!patient) return res.status(404).json({ error: "Patient not found" });
   const scans = listScans(patient.id);
   res.json({ data: scans });
-});
+  }
+);
 
-router.post("/:id/scans", (req, res) => {
+router.post(
+  "/:id/scans",
+  requireRole(["admin", "clinician", "staff", "patient"]),
+  (req, res) => {
+    const auth = req as AuthenticatedRequest;
+    if (auth.user?.role === "patient" && auth.user.patientId !== req.params.id) {
+      return res.status(403).json({ error: "Forbidden: patient mismatch" });
+    }
   const patient = getPatient(req.params.id);
   if (!patient) return res.status(404).json({ error: "Patient not found" });
 
@@ -75,6 +101,7 @@ router.post("/:id/scans", (req, res) => {
   });
 
   res.status(201).json({ data: scan });
-});
+  }
+);
 
 export default router;

@@ -1,8 +1,13 @@
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { createApp } from "../src/app";
+import { prisma } from "../src/prisma";
 
 const app = createApp();
+
+afterAll(async () => {
+  await prisma.$disconnect();
+});
 
 async function loginWithOtp(identifier: string) {
   await request(app).post("/auth/otp/send").send({ identifier });

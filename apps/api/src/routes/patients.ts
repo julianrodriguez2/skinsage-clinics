@@ -19,88 +19,97 @@ const router = Router();
 
 router.use(requireAuth());
 
-router.get("/", requireRole(["admin", "clinician", "staff"]), (req, res) => {
+router.get("/", requireRole(["admin", "clinician", "staff"]), async (req, res) => {
   const status =
     req.query.status === "inactive" || req.query.status === "active"
       ? (req.query.status as "inactive" | "active")
       : undefined;
-  const patients = listPatients({ status }).map((patient) => ({
-    ...patient,
-    needsScan: patientNeedsScan(patient.id)
-  }));
-  res.json({ data: patients });
+  const patients = await listPatients({ status });
+  const withCompliance = await Promise.all(
+    patients.map(async (patient) => ({
+      ...patient,
+      needsScan: await patientNeedsScan(patient.id)
+    }))
+  );
+  res.json({ data: withCompliance });
 });
 
-router.post("/", requireRole(["admin", "clinician", "staff"]), (req, res) => {
+router.post("/", requireRole(["admin", "clinician", "staff"]), async (req, res) => {
   const parsed = patientCreateSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
-  const patient = createPatient(parsed.data);
+  const patient = await createPatient(parsed.data);
   res.status(201).json({ data: patient });
 });
 
-router.post("/join", requireRole(["patient"]), (req, res) => {
+router.post("/join", requireRole(["patient"]), async (req, res) => {
   const parsed = patientJoinSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
-  const patient = upsertPatientFromClinicCode(parsed.data);
-  res.status(201).json({ data: patient });
+  try {
+    const patient = await upsertPatientFromClinicCode(parsed.data);
+    res.status(201).json({ data: patient });
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
 });
 
 router.get(
   "/:id",
   requireRole(["admin", "clinician", "staff", "patient"]),
-  (req, res) => {
+  async (req, res) => {
     const auth = req as AuthenticatedRequest;
     if (auth.user?.role === "patient" && auth.user.patientId !== req.params.id) {
       return res.status(403).json({ error: "Forbidden: patient mismatch" });
     }
-  const patient = getPatient(req.params.id);
-  if (!patient) return res.status(404).json({ error: "Patient not found" });
-  res.json({ data: { ...patient, needsScan: patientNeedsScan(patient.id) } });
+    const patient = await getPatient(req.params.id);
+    if (!patient) return res.status(404).json({ error: "Patient not found" });
+    res.json({
+      data: { ...patient, needsScan: await patientNeedsScan(patient.id) }
+    });
   }
 );
 
 router.get(
   "/:id/scans",
   requireRole(["admin", "clinician", "staff", "patient"]),
-  (req, res) => {
+  async (req, res) => {
     const auth = req as AuthenticatedRequest;
     if (auth.user?.role === "patient" && auth.user.patientId !== req.params.id) {
       return res.status(403).json({ error: "Forbidden: patient mismatch" });
     }
-  const patient = getPatient(req.params.id);
-  if (!patient) return res.status(404).json({ error: "Patient not found" });
-  const scans = listScans(patient.id);
-  res.json({ data: scans });
+    const patient = await getPatient(req.params.id);
+    if (!patient) return res.status(404).json({ error: "Patient not found" });
+    const scans = await listScans(patient.id);
+    res.json({ data: scans });
   }
 );
 
 router.post(
   "/:id/scans",
   requireRole(["admin", "clinician", "staff", "patient"]),
-  (req, res) => {
+  async (req, res) => {
     const auth = req as AuthenticatedRequest;
     if (auth.user?.role === "patient" && auth.user.patientId !== req.params.id) {
       return res.status(403).json({ error: "Forbidden: patient mismatch" });
     }
-  const patient = getPatient(req.params.id);
-  if (!patient) return res.status(404).json({ error: "Patient not found" });
+    const patient = await getPatient(req.params.id);
+    if (!patient) return res.status(404).json({ error: "Patient not found" });
 
-  const parsed = scanCreateSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: parsed.error.flatten() });
-  }
+    const parsed = scanCreateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: parsed.error.flatten() });
+    }
 
-  const scan = createScan({
-    patientId: patient.id,
-    capturedAt: parsed.data.capturedAt,
-    angles: parsed.data.angles
-  });
+    const scan = await createScan({
+      patientId: patient.id,
+      capturedAt: parsed.data.capturedAt,
+      angles: parsed.data.angles
+    });
 
-  res.status(201).json({ data: scan });
+    res.status(201).json({ data: scan });
   }
 );
 

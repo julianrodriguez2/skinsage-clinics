@@ -7,7 +7,7 @@ const router = Router();
 
 router.use(requireAuth());
 
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   const patientId = typeof req.query.patientId === "string" ? req.query.patientId : undefined;
   const auth = req as AuthenticatedRequest;
   if (auth.user?.role === "patient") {
@@ -18,12 +18,12 @@ router.get("/", (req, res) => {
     requireRole(["admin", "clinician", "staff"])(req, res, () => {});
     if (res.headersSent) return;
   }
-  const data = listScans(patientId);
+  const data = await listScans(patientId);
   res.json({ data });
 });
 
-router.get("/:id", (req, res) => {
-  const scan = getScan(req.params.id);
+router.get("/:id", async (req, res) => {
+  const scan = await getScan(req.params.id);
   if (!scan) return res.status(404).json({ error: "Scan not found" });
   const auth = req as AuthenticatedRequest;
   if (auth.user?.role === "patient" && auth.user.patientId !== scan.patientId) {
@@ -34,16 +34,20 @@ router.get("/:id", (req, res) => {
   res.json({ data: scan });
 });
 
-router.patch("/:id", (req, res) => {
+router.patch("/:id", async (req, res) => {
   requireRole(["admin", "clinician", "staff"])(req, res, () => {});
   if (res.headersSent) return;
   const parsed = scanStatusSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
-  const updated = updateScanStatus(req.params.id, parsed.data);
-  if (!updated) return res.status(404).json({ error: "Scan not found" });
-  res.json({ data: updated });
+  try {
+    const updated = await updateScanStatus(req.params.id, parsed.data);
+    if (!updated) return res.status(404).json({ error: "Scan not found" });
+    res.json({ data: updated });
+  } catch (err) {
+    res.status(404).json({ error: "Scan not found" });
+  }
 });
 
 export default router;

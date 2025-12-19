@@ -1,35 +1,44 @@
-import { randomUUID } from "crypto";
-import { Patient, Scan, ScanAngle, ScanImage } from "./types";
+import { Prisma, ScanAngle, ScanStatus } from "@prisma/client";
+import { prisma } from "./prisma";
 import { REQUIRED_ANGLES } from "./validators";
 
-const patients = new Map<string, Patient>();
-const scans = new Map<string, Scan>();
-
-export const ClinicCodes: Record<string, string> = {
-  "SKIN-001": "demo-clinic"
-};
-
-export function createPatient(data: Omit<Patient, "id" | "createdAt">): Patient {
-  const id = randomUUID();
-  const patient: Patient = {
-    ...data,
-    id,
-    createdAt: new Date().toISOString()
-  };
-  patients.set(id, patient);
-  return patient;
+export async function createPatient(data: {
+  clinicId: string;
+  name: string;
+  email?: string;
+  phone?: string;
+  consentVersion: string;
+  status: "active" | "inactive";
+  joinedAt?: string;
+  userId?: string;
+}) {
+  return prisma.patient.create({
+    data: {
+      clinicId: data.clinicId,
+      name: data.name,
+      email: data.email,
+      phone: data.phone,
+      consentVersion: data.consentVersion,
+      status: data.status === "inactive" ? "inactive" : "active",
+      joinedAt: data.joinedAt ? new Date(data.joinedAt) : new Date(),
+      userId: data.userId
+    }
+  });
 }
 
-export function upsertPatientFromClinicCode(input: {
+export async function upsertPatientFromClinicCode(input: {
   clinicCode: string;
   name: string;
   email?: string;
   phone?: string;
   consentVersion: string;
-}): Patient {
-  const clinicId = ClinicCodes[input.clinicCode] ?? "unknown";
+}) {
+  const clinic = await prisma.clinic.findUnique({ where: { code: input.clinicCode } });
+  if (!clinic) {
+    throw new Error("Invalid clinic code");
+  }
   return createPatient({
-    clinicId,
+    clinicId: clinic.id,
     name: input.name,
     email: input.email,
     phone: input.phone,
@@ -39,80 +48,86 @@ export function upsertPatientFromClinicCode(input: {
   });
 }
 
-export function listPatients(filter?: { status?: Patient["status"] }): Patient[] {
-  const all = Array.from(patients.values());
-  if (!filter?.status) return all;
-  return all.filter((p) => p.status === filter.status);
+export async function listPatients(filter?: { status?: "active" | "inactive" }) {
+  return prisma.patient.findMany({
+    where: {
+      status: filter?.status
+    },
+    orderBy: { createdAt: "desc" }
+  });
 }
 
-export function getPatient(id: string): Patient | undefined {
-  return patients.get(id);
+export async function getPatient(id: string) {
+  return prisma.patient.findUnique({ where: { id } });
 }
 
-export function createScan(input: {
+export async function createScan(input: {
   patientId: string;
   capturedAt?: string;
   angles: { angle: ScanAngle; checksum?: string }[];
-}): Scan {
+}) {
   const existingAngles = new Set<ScanAngle>();
-  const images: ScanImage[] = input.angles.map((angle) => {
+  const images = input.angles.map((angle) => {
     existingAngles.add(angle.angle);
     return {
-      id: randomUUID(),
-      scanId: "",
       angle: angle.angle,
       checksum: angle.checksum
     };
   });
 
   const missingAngles = REQUIRED_ANGLES.filter((angle) => !existingAngles.has(angle));
-  const scanId = randomUUID();
-  const scan: Scan = {
-    id: scanId,
-    patientId: input.patientId,
-    capturedAt: input.capturedAt ?? new Date().toISOString(),
-    status: "processing",
-    qualityFlags: [],
-    images: images.map((img) => ({ ...img, scanId })),
-    missingAngles
-  };
 
-  scans.set(scanId, scan);
-  return scan;
+  return prisma.scan.create({
+    data: {
+      patientId: input.patientId,
+      capturedAt: input.capturedAt ? new Date(input.capturedAt) : new Date(),
+      status: "processing",
+      qualityFlags: [],
+      missingAngles,
+      images: {
+        create: images
+      }
+    },
+    include: {
+      images: true
+    }
+  });
 }
 
-export function listScans(patientId?: string): Scan[] {
-  const all = Array.from(scans.values());
-  if (!patientId) return all;
-  return all.filter((scan) => scan.patientId === patientId);
+export async function listScans(patientId?: string) {
+  return prisma.scan.findMany({
+    where: patientId ? { patientId } : undefined,
+    include: { images: true },
+    orderBy: { capturedAt: "desc" }
+  });
 }
 
-export function getScan(id: string): Scan | undefined {
-  return scans.get(id);
+export async function getScan(id: string) {
+  return prisma.scan.findUnique({ where: { id }, include: { images: true } });
 }
 
-export function updateScanStatus(
+export async function updateScanStatus(
   id: string,
-  payload: Partial<Pick<Scan, "status" | "qualityFlags" | "notes">>
-): Scan | undefined {
-  const existing = scans.get(id);
-  if (!existing) return undefined;
-  const updated: Scan = {
-    ...existing,
-    ...payload,
-    qualityFlags: payload.qualityFlags ?? existing.qualityFlags
-  };
-  scans.set(id, updated);
-  return updated;
+  payload: Partial<Pick<Prisma.ScanUpdateInput, "status" | "qualityFlags" | "notes">>
+) {
+  return prisma.scan.update({
+    where: { id },
+    data: {
+      status: payload.status as ScanStatus | undefined,
+      qualityFlags: payload.qualityFlags as string[] | undefined,
+      notes: payload.notes as string | undefined
+    },
+    include: { images: true }
+  });
 }
 
-export function patientNeedsScan(patientId: string, thresholdDays = 30): boolean {
-  const patientScans = listScans(patientId).sort((a, b) =>
-    a.capturedAt < b.capturedAt ? 1 : -1
-  );
-  if (!patientScans.length) return true;
-  const last = new Date(patientScans[0].capturedAt).getTime();
-  const now = Date.now();
-  const diffDays = (now - last) / (1000 * 60 * 60 * 24);
+export async function patientNeedsScan(patientId: string, thresholdDays = 30) {
+  const latest = await prisma.scan.findFirst({
+    where: { patientId },
+    orderBy: { capturedAt: "desc" },
+    select: { capturedAt: true }
+  });
+  if (!latest) return true;
+  const diffDays = (Date.now() - latest.capturedAt.getTime()) / (1000 * 60 * 60 * 24);
   return diffDays > thresholdDays;
 }

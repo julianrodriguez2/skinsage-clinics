@@ -1,0 +1,167 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  admin
+  clinician
+  staff
+  patient
+}
+
+enum PatientStatus {
+  active
+  inactive
+}
+
+enum ScanStatus {
+  pending
+  processing
+  complete
+  rejected
+}
+
+enum ScanAngle {
+  front
+  left
+  right
+  left45
+  right45
+}
+
+enum AppointmentStatus {
+  scheduled
+  completed
+  canceled
+}
+
+enum NoteScope {
+  scan
+  visit
+  general
+}
+
+model User {
+  id        String   @id @default(cuid())
+  identifier String  @unique
+  role      Role
+  createdAt DateTime @default(now())
+
+  patient   Patient?
+  notes     Note[]
+  auditLogs AuditLog[]
+  clinics   ClinicMember[]
+}
+
+model Clinic {
+  id        String         @id @default(cuid())
+  name      String
+  code      String         @unique
+  branding  Json?
+  createdAt DateTime       @default(now())
+
+  patients      Patient[]
+  appointments  Appointment[]
+  staff         ClinicMember[]
+}
+
+model ClinicMember {
+  id        String   @id @default(cuid())
+  role      Role
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  clinic    Clinic   @relation(fields: [clinicId], references: [id])
+  clinicId  String
+  createdAt DateTime @default(now())
+
+  @@unique([userId, clinicId])
+}
+
+model Patient {
+  id             String         @id @default(cuid())
+  clinicId       String
+  clinic         Clinic         @relation(fields: [clinicId], references: [id])
+  userId         String?        @unique
+  user           User?          @relation(fields: [userId], references: [id])
+  name           String
+  email          String?
+  phone          String?
+  consentVersion String
+  status         PatientStatus  @default(active)
+  joinedAt       DateTime?
+  createdAt      DateTime       @default(now())
+
+  scans        Scan[]
+  appointments Appointment[]
+  notes        Note[]
+}
+
+model Scan {
+  id           String      @id @default(cuid())
+  patientId    String
+  patient      Patient     @relation(fields: [patientId], references: [id])
+  capturedAt   DateTime
+  status       ScanStatus  @default(processing)
+  qualityFlags String[]
+  missingAngles ScanAngle[]
+  ingestJobId  String?
+  notes        String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  images ScanImage[]
+}
+
+model ScanImage {
+  id         String     @id @default(cuid())
+  scanId     String
+  scan       Scan       @relation(fields: [scanId], references: [id])
+  angle      ScanAngle
+  url        String?
+  blurScore  Float?
+  lightScore Float?
+  poseOk     Boolean?
+  checksum   String?
+  createdAt  DateTime   @default(now())
+}
+
+model Appointment {
+  id             String            @id @default(cuid())
+  patientId      String
+  patient        Patient           @relation(fields: [patientId], references: [id])
+  clinicId       String
+  clinic         Clinic            @relation(fields: [clinicId], references: [id])
+  startAt        DateTime
+  status         AppointmentStatus @default(scheduled)
+  remindersSent  Int               @default(0)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+}
+
+model Note {
+  id        String    @id @default(cuid())
+  patientId String
+  patient   Patient   @relation(fields: [patientId], references: [id])
+  authorId  String
+  author    User      @relation(fields: [authorId], references: [id])
+  scope     NoteScope
+  body      String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id])
+  entityType String
+  entityId   String?
+  action     String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+}

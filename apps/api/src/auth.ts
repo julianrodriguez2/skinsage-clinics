@@ -1,7 +1,7 @@
 import jwt from "jsonwebtoken";
 import { nanoid } from "nanoid";
-import { createPatient } from "./store";
-import { Role } from "./types";
+import { Role } from "@prisma/client";
+import { prisma } from "./prisma";
 
 const ACCESS_TOKEN_TTL = Number(
   process.env.ACCESS_TOKEN_TTL_SECONDS ?? 15 * 60
@@ -11,13 +11,6 @@ const REFRESH_TOKEN_TTL = Number(
 ); // 7d
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || JWT_SECRET;
-
-type UserRecord = {
-  id: string;
-  identifier: string;
-  role: Role;
-  patientId?: string;
-};
 
 type RefreshSession = {
   tokenId: string;
@@ -36,36 +29,53 @@ type OtpEntry = {
 const otpStore = new Map<string, OtpEntry>();
 const refreshStore = new Map<string, RefreshSession>();
 
-// Seed demo users
-const demoPatient = createPatient({
-  clinicId: "demo-clinic",
-  name: "Demo Patient",
-  email: "demo-patient@skinsage.com",
-  consentVersion: "v1",
-  status: "active",
-  joinedAt: new Date().toISOString(),
-  phone: undefined,
-});
+let demoSeedPromise: Promise<void> | null = null;
 
-const users = new Map<string, UserRecord>([
-  [
-    "demo-clinician@skinsage.com",
-    {
-      id: "user-1",
-      identifier: "demo-clinician@skinsage.com",
-      role: "clinician",
+async function seedDemo() {
+  const clinic = await prisma.clinic.upsert({
+    where: { code: "SKIN-001" },
+    update: {},
+    create: { id: "demo-clinic", name: "Demo Clinic", code: "SKIN-001" },
+  });
+
+  const clinician = await prisma.user.upsert({
+    where: { identifier: "demo-clinician@skinsage.com" },
+    update: {},
+    create: { identifier: "demo-clinician@skinsage.com", role: "clinician" },
+  });
+
+  const patientUser = await prisma.user.upsert({
+    where: { identifier: "demo-patient@skinsage.com" },
+    update: {},
+    create: { identifier: "demo-patient@skinsage.com", role: "patient" },
+  });
+
+  await prisma.clinicMember.upsert({
+    where: { userId_clinicId: { userId: clinician.id, clinicId: clinic.id } },
+    update: {},
+    create: { userId: clinician.id, clinicId: clinic.id, role: "clinician" },
+  });
+
+  await prisma.patient.upsert({
+    where: { userId: patientUser.id },
+    update: {},
+    create: {
+      clinicId: clinic.id,
+      userId: patientUser.id,
+      name: "Demo Patient",
+      consentVersion: "v1",
+      status: "active",
+      joinedAt: new Date(),
     },
-  ],
-  [
-    "demo-patient@skinsage.com",
-    {
-      id: "user-2",
-      identifier: "demo-patient@skinsage.com",
-      role: "patient",
-      patientId: demoPatient.id,
-    },
-  ],
-]);
+  });
+}
+
+async function ensureDemoSeed() {
+  if (!demoSeedPromise) {
+    demoSeedPromise = seedDemo();
+  }
+  return demoSeedPromise;
+}
 
 type AccessClaims = {
   sub: string;
@@ -90,13 +100,23 @@ export type AuthContext = {
   tokenId: string;
 };
 
-export function findUserByIdentifier(
-  identifier: string
-): UserRecord | undefined {
-  return users.get(identifier);
+export async function findUserByIdentifier(identifier: string) {
+  await ensureDemoSeed();
+  const user = await prisma.user.findUnique({
+    where: { identifier },
+    include: { patient: { select: { id: true } } },
+  });
+  if (!user) return undefined;
+  return {
+    id: user.id,
+    identifier: user.identifier,
+    role: user.role,
+    patientId: user.patient?.id,
+  };
 }
 
-export function issueOtp(identifier: string) {
+export async function issueOtp(identifier: string) {
+  await ensureDemoSeed();
   const code = Math.floor(100000 + Math.random() * 900000).toString();
   const expiresAt = Date.now() + 5 * 60 * 1000;
   otpStore.set(identifier, { code, expiresAt });
@@ -111,7 +131,11 @@ export function verifyOtp(identifier: string, code: string): boolean {
   return isValid;
 }
 
-export function issueTokens(user: UserRecord) {
+export function issueTokens(user: {
+  id: string;
+  role: Role;
+  patientId?: string;
+}) {
   const accessId = nanoid();
   const refreshId = nanoid();
 
@@ -184,7 +208,7 @@ export function rotateRefreshToken(token: string) {
     session.active = false;
     refreshStore.set(decoded.jti, session);
 
-    const user: UserRecord = {
+    const user = {
       id: decoded.sub,
       identifier: "",
       role: decoded.role,
@@ -204,7 +228,9 @@ export function invalidateRefresh(token: string) {
       session.active = false;
       refreshStore.set(decoded.jti, session);
     }
-  } catch {}
+  } catch {
+    // ignore
+  }
 }
 
 // expose the OTP for automated tests (not for production use).

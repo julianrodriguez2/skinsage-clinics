@@ -6,21 +6,21 @@ import {
   issueOtp,
   issueTokens,
   rotateRefreshToken,
-  verifyOtp,
+  verifyOtp
 } from "../auth";
 import { loginSchema } from "../validators";
 import { z } from "zod";
 
 const router = Router();
 
-router.post("/login", (req, res) => {
+router.post("/login", async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
 
   const { identifier, code } = parsed.data;
-  const user = findUserByIdentifier(identifier);
+  const user = await findUserByIdentifier(identifier);
   if (!user) {
     return res.status(404).json({ error: "User not found" });
   }
@@ -34,18 +34,18 @@ router.post("/login", (req, res) => {
   res.json({
     token: tokens.accessToken,
     refreshToken: tokens.refreshToken,
-    user: { id: user.id, role: user.role, patientId: user.patientId },
+    user: { id: user.id, role: user.role, patientId: user.patientId }
   });
 });
 
-router.post("/otp/send", (req, res) => {
+router.post("/otp/send", async (req, res) => {
   const parsed = loginSchema.pick({ identifier: true }).safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: parsed.error.flatten() });
   }
-  const user = findUserByIdentifier(parsed.data.identifier);
+  const user = await findUserByIdentifier(parsed.data.identifier);
   if (!user) return res.status(404).json({ error: "User not found" });
-  const entry = issueOtp(parsed.data.identifier);
+  const entry = await issueOtp(parsed.data.identifier);
   res.json({ ok: true, expiresAt: entry.expiresAt });
 });
 

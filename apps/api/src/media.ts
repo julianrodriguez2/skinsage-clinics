@@ -234,11 +234,18 @@ export async function ingestScanMedia(scanId: string) {
         : body instanceof Uint8Array
           ? Buffer.from(body)
           : await streamToBuffer(body as NodeJS.ReadableStream);
-      const checksum = createHash("sha256").update(buffer).digest("hex");
+    const checksumRaw = createHash("sha256").update(buffer).digest("hex");
+    const checksumBase64 = createHash("sha256")
+      .update(buffer.toString("base64"))
+      .digest("hex");
 
-      if (image.checksum && image.checksum !== checksum) {
-        qualityFlags.add(`checksum_mismatch:${image.angle}`);
-      }
+    if (
+      image.checksum &&
+      image.checksum !== checksumRaw &&
+      image.checksum !== checksumBase64
+    ) {
+      qualityFlags.add(`checksum_mismatch:${image.angle}`);
+    }
 
       const analysis = await analyzeImage(buffer);
       if (analysis.blurScore < BLUR_THRESHOLD) {

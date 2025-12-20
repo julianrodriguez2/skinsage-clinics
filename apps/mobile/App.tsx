@@ -1,9 +1,11 @@
 import { Camera, CameraType } from "expo-camera";
+import { BarCodeScanner } from "expo-barcode-scanner";
 import * as Crypto from "expo-crypto";
 import * as FaceDetector from "expo-face-detector";
 import * as FileSystem from "expo-file-system";
+import * as SecureStore from "expo-secure-store";
 import { StatusBar } from "expo-status-bar";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -13,18 +15,27 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  View
 } from "react-native";
 
-const API_BASE =
-  process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+const API_BASE = process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+
+const SECURE_KEYS = {
+  token: "skinsage_token",
+  refresh: "skinsage_refresh",
+  patientId: "skinsage_patient_id",
+  clinicCode: "skinsage_clinic_code",
+  clinicLinked: "skinsage_clinic_linked",
+  consent: "skinsage_consent",
+  identifier: "skinsage_identifier"
+};
 
 const ANGLES = [
   { key: "front", label: "Front", yaw: { min: -10, max: 10 } },
   { key: "left45", label: "45 deg Left", yaw: { min: -40, max: -15 } },
   { key: "left", label: "Left", yaw: { min: -65, max: -35 } },
   { key: "right45", label: "45 deg Right", yaw: { min: 15, max: 40 } },
-  { key: "right", label: "Right", yaw: { min: 35, max: 65 } },
+  { key: "right", label: "Right", yaw: { min: 35, max: 65 } }
 ] as const;
 
 type AngleKey = (typeof ANGLES)[number]["key"];
@@ -54,29 +65,108 @@ type UploadState = {
   total?: number;
 };
 
+type AuthState = {
+  token: string | null;
+  refresh: string | null;
+  patientId: string | null;
+  clinicCode: string | null;
+  clinicLinked: boolean;
+  consentAccepted: boolean;
+  identifier: string | null;
+};
+
+const initialAuth: AuthState = {
+  token: null,
+  refresh: null,
+  patientId: null,
+  clinicCode: null,
+  clinicLinked: false,
+  consentAccepted: false,
+  identifier: null
+};
+
 function yawInRange(angle: AngleKey, yaw: number) {
   const range = ANGLES.find((item) => item.key === angle)?.yaw;
   if (!range) return false;
   return yaw >= range.min && yaw <= range.max;
 }
 
-async function digestFile(uri: string) {
+function parseClinicCode(data: string) {
+  const value = data.trim();
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    const code = url.searchParams.get("code");
+    return code ?? value;
+  } catch {
+    return value;
+  }
+}
+
+async function setSecureItem(key: string, value: string | null) {
+  if (!value) {
+    await SecureStore.deleteItemAsync(key);
+    return;
+  }
+  await SecureStore.setItemAsync(key, value);
+}
+
+async function loadAuthState(): Promise<AuthState> {
+  const [
+    token,
+    refresh,
+    patientId,
+    clinicCode,
+    clinicLinked,
+    consent,
+    identifier
+  ] = await Promise.all([
+    SecureStore.getItemAsync(SECURE_KEYS.token),
+    SecureStore.getItemAsync(SECURE_KEYS.refresh),
+    SecureStore.getItemAsync(SECURE_KEYS.patientId),
+    SecureStore.getItemAsync(SECURE_KEYS.clinicCode),
+    SecureStore.getItemAsync(SECURE_KEYS.clinicLinked),
+    SecureStore.getItemAsync(SECURE_KEYS.consent),
+    SecureStore.getItemAsync(SECURE_KEYS.identifier)
+  ]);
+
+  return {
+    token: token ?? null,
+    refresh: refresh ?? null,
+    patientId: patientId ?? null,
+    clinicCode: clinicCode ?? null,
+    clinicLinked: clinicLinked === "true",
+    consentAccepted: consent === "true",
+    identifier: identifier ?? null
+  };
+}
+
+async function persistAuthState(state: AuthState) {
+  await Promise.all([
+    setSecureItem(SECURE_KEYS.token, state.token),
+    setSecureItem(SECURE_KEYS.refresh, state.refresh),
+    setSecureItem(SECURE_KEYS.patientId, state.patientId),
+    setSecureItem(SECURE_KEYS.clinicCode, state.clinicCode),
+    setSecureItem(SECURE_KEYS.clinicLinked, state.clinicLinked ? "true" : null),
+    setSecureItem(SECURE_KEYS.consent, state.consentAccepted ? "true" : null),
+    setSecureItem(SECURE_KEYS.identifier, state.identifier)
+  ]);
+}
+
+async function digestFileBase64(uri: string) {
   const base64 = await FileSystem.readAsStringAsync(uri, {
-    encoding: FileSystem.EncodingType.Base64,
+    encoding: FileSystem.EncodingType.Base64
   });
   return Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, base64, {
-    encoding: Crypto.CryptoEncoding.BASE64,
+    encoding: Crypto.CryptoEncoding.HEX
   });
 }
 
-async function evaluateCapture(
-  uri: string,
-  angle: AngleKey
-): Promise<CaptureQuality> {
+async function evaluateCapture(uri: string, angle: AngleKey): Promise<CaptureQuality> {
   const faces = await FaceDetector.detectFacesAsync(uri, {
     mode: FaceDetector.FaceDetectorMode.fast,
     detectLandmarks: FaceDetector.FaceDetectorLandmarks.none,
-    runClassifications: FaceDetector.FaceDetectorClassifications.none,
+    runClassifications: FaceDetector.FaceDetectorClassifications.none
   });
 
   const face = faces.faces[0];
@@ -85,7 +175,6 @@ async function evaluateCapture(
 
   const fileInfo = await FileSystem.getInfoAsync(uri, { size: true });
   const size = fileInfo.size ?? 0;
-  // Placeholder until native pixel analysis is wired
   const blurScore = Math.min(1, size / 250000);
   const lightScore = Math.min(1, size / 180000);
   const blurOk = blurScore >= 0.35;
@@ -98,29 +187,29 @@ async function evaluateCapture(
     lightOk,
     blurScore,
     lightScore,
-    yaw,
+    yaw
   };
 }
 
 async function apiPost<T>(
   path: string,
-  token: string,
+  token: string | null,
   body?: Record<string, unknown>
 ): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
     },
-    body: body ? JSON.stringify(body) : undefined,
+    body: body ? JSON.stringify(body) : undefined
   });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || `Request failed: ${res.status}`);
   }
-  const json = (await res.json()) as { data: T };
-  return json.data;
+  const json = (await res.json()) as { data?: T; token?: string; refreshToken?: string };
+  return (json.data ?? json) as T;
 }
 
 function delay(ms: number) {
@@ -138,7 +227,7 @@ async function uploadWithRetry(
       const res = await FileSystem.uploadAsync(uploadUrl, uri, {
         httpMethod: "PUT",
         uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-        headers: { "Content-Type": contentType },
+        headers: { "Content-Type": contentType }
       });
       if (res.status >= 200 && res.status < 300) return;
     } catch (err) {
@@ -151,18 +240,57 @@ async function uploadWithRetry(
 
 export default function App() {
   const cameraRef = useRef<Camera | null>(null);
+  const authRef = useRef<AuthState>(initialAuth);
+
   const [permission, requestPermission] = Camera.useCameraPermissions();
+  const [auth, setAuth] = useState<AuthState>(initialAuth);
+  const [hydrating, setHydrating] = useState(true);
   const [captureMode, setCaptureMode] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [captures, setCaptures] = useState<Record<AngleKey, CaptureItem>>({});
   const [preview, setPreview] = useState<CaptureItem | null>(null);
   const [captureBusy, setCaptureBusy] = useState(false);
   const [liveYaw, setLiveYaw] = useState<number | null>(null);
-  const [apiToken, setApiToken] = useState("");
-  const [patientId, setPatientId] = useState("");
   const [uploadState, setUploadState] = useState<UploadState>({
-    status: "idle",
+    status: "idle"
   });
+
+  const [identifier, setIdentifier] = useState(auth.identifier ?? "");
+  const [otpCode, setOtpCode] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  const [clinicCode, setClinicCode] = useState(auth.clinicCode ?? "");
+  const [patientName, setPatientName] = useState("");
+  const [joinError, setJoinError] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [scannerPermission, setScannerPermission] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    loadAuthState()
+      .then((stored) => {
+        authRef.current = stored;
+        setAuth(stored);
+        setIdentifier(stored.identifier ?? "");
+        setClinicCode(stored.clinicCode ?? "");
+      })
+      .finally(() => setHydrating(false));
+  }, []);
+
+  useEffect(() => {
+    authRef.current = auth;
+  }, [auth]);
+
+  const updateAuth = async (patch: Partial<AuthState>) => {
+    const next = { ...authRef.current, ...patch };
+    authRef.current = next;
+    setAuth(next);
+    await persistAuthState(next);
+  };
+
+  const isAuthed = Boolean(auth.token);
+  const clinicReady = auth.clinicLinked;
+  const consentReady = auth.consentAccepted;
 
   const currentAngle = ANGLES[currentIndex];
   const allCaptured = ANGLES.every((angle) => captures[angle.key]);
@@ -198,14 +326,14 @@ export default function App() {
     try {
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.85,
-        skipProcessing: true,
+        skipProcessing: true
       });
       const quality = await evaluateCapture(photo.uri, currentAngle.key);
       const capture: CaptureItem = {
         uri: photo.uri,
         angle: currentAngle.key,
         contentType: "image/jpeg",
-        quality,
+        quality
       };
       setPreview(capture);
     } finally {
@@ -217,7 +345,7 @@ export default function App() {
     if (!preview) return;
     setCaptureBusy(true);
     try {
-      const checksum = await digestFile(preview.uri);
+      const checksum = await digestFileBase64(preview.uri);
       const stored = { ...preview, checksum };
       setCaptures((prev) => ({ ...prev, [preview.angle]: stored }));
       setPreview(null);
@@ -235,11 +363,8 @@ export default function App() {
   };
 
   const handleUpload = async () => {
-    if (!apiToken || !patientId) {
-      setUploadState({
-        status: "error",
-        message: "Set API token and patient ID.",
-      });
+    if (!auth.token || !auth.patientId) {
+      setUploadState({ status: "error", message: "Missing auth or patient ID." });
       return;
     }
     if (!allCaptured) {
@@ -251,31 +376,23 @@ export default function App() {
       setUploadState({ status: "uploading", message: "Creating scan..." });
       const anglesPayload = ANGLES.map((angle) => ({
         angle: angle.key,
-        checksum: captures[angle.key]?.checksum,
+        checksum: captures[angle.key]?.checksum
       }));
       const scan = await apiPost<{ id: string }>(
-        `/patients/${patientId}/scans`,
-        apiToken,
+        `/patients/${auth.patientId}/scans`,
+        auth.token,
         { angles: anglesPayload }
       );
 
-      setUploadState({
-        status: "uploading",
-        message: "Requesting upload URLs...",
-      });
+      setUploadState({ status: "uploading", message: "Requesting upload URLs..." });
       const uploadUrls = await apiPost<
-        {
-          angle: AngleKey;
-          uploadUrl: string;
-          storageKey: string;
-          url: string;
-        }[]
-      >(`/scans/${scan.id}/upload-urls`, apiToken, {
+        { angle: AngleKey; uploadUrl: string; storageKey: string; url: string }[]
+      >(`/scans/${scan.id}/upload-urls`, auth.token, {
         angles: ANGLES.map((angle) => ({
           angle: angle.key,
           checksum: captures[angle.key]?.checksum,
-          contentType: captures[angle.key]?.contentType ?? "image/jpeg",
-        })),
+          contentType: captures[angle.key]?.contentType ?? "image/jpeg"
+        }))
       });
 
       const urlsByAngle = new Map(uploadUrls.map((item) => [item.angle, item]));
@@ -288,26 +405,263 @@ export default function App() {
           status: "uploading",
           message: `Uploading ${angle.label}...`,
           completed,
-          total: ANGLES.length,
+          total: ANGLES.length
         });
-        await uploadWithRetry(
-          capture.uri,
-          upload.uploadUrl,
-          capture.contentType
-        );
+        await uploadWithRetry(capture.uri, upload.uploadUrl, capture.contentType);
         completed += 1;
       }
 
       setUploadState({ status: "uploading", message: "Verifying scan..." });
-      await apiPost(`/scans/${scan.id}/ingest`, apiToken, {});
+      await apiPost(`/scans/${scan.id}/ingest`, auth.token, {});
       setUploadState({ status: "done", message: "Upload complete." });
     } catch (err) {
       setUploadState({
         status: "error",
-        message: err instanceof Error ? err.message : "Upload failed.",
+        message: err instanceof Error ? err.message : "Upload failed."
       });
     }
   };
+
+  const handleSendOtp = async () => {
+    setAuthError(null);
+    try {
+      await apiPost("/auth/otp/send", null, { identifier });
+      setOtpSent(true);
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : "OTP failed.");
+    }
+  };
+
+  const handleVerifyOtp = async () => {
+    setAuthError(null);
+    try {
+      const response = await apiPost<{
+        token: string;
+        refreshToken: string;
+        user: { id: string; role: string; patientId?: string };
+      }>("/auth/login", null, { identifier, code: otpCode });
+      await updateAuth({
+        token: response.token,
+        refresh: response.refreshToken,
+        patientId: response.user.patientId ?? auth.patientId,
+        identifier
+      });
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : "Login failed.");
+    }
+  };
+
+  const handleJoinClinic = async () => {
+    setJoinError(null);
+    const parsed = parseClinicCode(clinicCode);
+    if (!parsed) {
+      setJoinError("Enter a clinic code.");
+      return;
+    }
+    if (!patientName.trim()) {
+      setJoinError("Enter your full name.");
+      return;
+    }
+    try {
+      const patient = await apiPost<{ id: string; clinicId: string }>(
+        "/patients/join",
+        auth.token,
+        {
+          clinicCode: parsed,
+          name: patientName.trim(),
+          consentVersion: "v1"
+        }
+      );
+      await updateAuth({
+        patientId: patient.id,
+        clinicCode: parsed,
+        clinicLinked: true
+      });
+    } catch (err) {
+      setJoinError(err instanceof Error ? err.message : "Join failed.");
+    }
+  };
+
+  const handleScanQr = async () => {
+    const permission = await BarCodeScanner.requestPermissionsAsync();
+    setScannerPermission(permission.status === "granted");
+    if (permission.status === "granted") {
+      setScanning(true);
+    }
+  };
+
+  const handleQrScanned = ({ data }: { data: string }) => {
+    const code = parseClinicCode(data);
+    if (code) {
+      setClinicCode(code);
+      setScanning(false);
+    }
+  };
+
+  const handleConsent = async () => {
+    await updateAuth({ consentAccepted: true });
+  };
+
+  const handleLogout = async () => {
+    const cleared = { ...initialAuth };
+    authRef.current = cleared;
+    setAuth(cleared);
+    await persistAuthState(cleared);
+    setIdentifier("");
+    setOtpCode("");
+    setOtpSent(false);
+    setClinicCode("");
+    setPatientName("");
+    setCaptures({});
+    setCurrentIndex(0);
+    setUploadState({ status: "idle" });
+  };
+
+  if (hydrating) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <StatusBar style="light" />
+        <View style={styles.center}>
+          <ActivityIndicator color="#2fd2a1" />
+          <Text style={styles.small}>Loading...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!isAuthed) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <StatusBar style="light" />
+        <ScrollView contentContainerStyle={styles.container}>
+          <Text style={styles.title}>SkinSage Clinical</Text>
+          <Text style={styles.sub}>Secure OTP login</Text>
+
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Sign in</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Email or phone"
+              placeholderTextColor="#64748b"
+              value={identifier}
+              onChangeText={setIdentifier}
+              autoCapitalize="none"
+            />
+            {otpSent ? (
+              <>
+                <TextInput
+                  style={styles.input}
+                  placeholder="One-time code"
+                  placeholderTextColor="#64748b"
+                  value={otpCode}
+                  onChangeText={setOtpCode}
+                  keyboardType="number-pad"
+                />
+                <TouchableOpacity style={styles.btn} onPress={handleVerifyOtp}>
+                  <Text style={styles.btnText}>Verify code</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <TouchableOpacity style={styles.btn} onPress={handleSendOtp}>
+                <Text style={styles.btnText}>Send OTP</Text>
+              </TouchableOpacity>
+            )}
+            {authError ? <Text style={styles.errorText}>{authError}</Text> : null}
+            <Text style={styles.small}>
+              Demo: use demo-patient@skinsage.com and OTP from the API test
+              endpoint.
+            </Text>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  if (!clinicReady) {
+    if (scanning) {
+      return (
+        <View style={styles.cameraScreen}>
+          <StatusBar style="light" />
+          <BarCodeScanner onBarCodeScanned={handleQrScanned} style={styles.camera} />
+          <View style={styles.cameraOverlay}>
+            <Text style={styles.cameraTitle}>Scan clinic QR</Text>
+            <TouchableOpacity style={styles.btnSecondary} onPress={() => setScanning(false)}>
+              <Text style={styles.btnTextDark}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
+
+    return (
+      <SafeAreaView style={styles.safe}>
+        <StatusBar style="light" />
+        <ScrollView contentContainerStyle={styles.container}>
+          <Text style={styles.title}>Connect to clinic</Text>
+          <Text style={styles.sub}>Join with a code or QR.</Text>
+
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Clinic code</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Clinic code"
+              placeholderTextColor="#64748b"
+              value={clinicCode}
+              onChangeText={setClinicCode}
+              autoCapitalize="characters"
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Full name"
+              placeholderTextColor="#64748b"
+              value={patientName}
+              onChangeText={setPatientName}
+            />
+            <TouchableOpacity style={styles.btn} onPress={handleJoinClinic}>
+              <Text style={styles.btnText}>Join clinic</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.btnSecondary} onPress={handleScanQr}>
+              <Text style={styles.btnTextDark}>Scan QR code</Text>
+            </TouchableOpacity>
+            {scannerPermission === false ? (
+              <Text style={styles.errorText}>Camera permission is required.</Text>
+            ) : null}
+            {joinError ? <Text style={styles.errorText}>{joinError}</Text> : null}
+            <TouchableOpacity
+              style={styles.linkBtn}
+              onPress={() => updateAuth({ clinicLinked: true })}
+            >
+              <Text style={styles.linkText}>Skip for now</Text>
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  if (!consentReady) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <StatusBar style="light" />
+        <ScrollView contentContainerStyle={styles.container}>
+          <Text style={styles.title}>Consent</Text>
+          <Text style={styles.sub}>Please review and accept.</Text>
+          <View style={styles.card}>
+            <Text style={styles.body}>
+              You consent to secure storage of medical images and agree to the clinic
+              privacy policy. Images are encrypted and used for longitudinal tracking.
+            </Text>
+            <TouchableOpacity style={styles.btn} onPress={handleConsent}>
+              <Text style={styles.btnText}>I agree</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.btnSecondary} onPress={handleLogout}>
+              <Text style={styles.btnTextDark}>Sign out</Text>
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
 
   if (captureMode) {
     return (
@@ -321,7 +675,7 @@ export default function App() {
           faceDetectorSettings={{
             mode: FaceDetector.FaceDetectorMode.fast,
             detectLandmarks: FaceDetector.FaceDetectorLandmarks.none,
-            runClassifications: FaceDetector.FaceDetectorClassifications.none,
+            runClassifications: FaceDetector.FaceDetectorClassifications.none
           }}
         />
         <View style={styles.cameraOverlay}>
@@ -333,19 +687,14 @@ export default function App() {
           </View>
           <View style={styles.guide} />
           <View style={styles.qualityRow}>
-            <View
-              style={[styles.dot, livePoseOk ? styles.dotOk : styles.dotWarn]}
-            />
+            <View style={[styles.dot, livePoseOk ? styles.dotOk : styles.dotWarn]} />
             <Text style={styles.small}>
               {liveYaw === null ? "Face not detected" : "Pose aligned"}
             </Text>
           </View>
           {preview ? (
             <View style={styles.previewCard}>
-              <Image
-                source={{ uri: preview.uri }}
-                style={styles.previewImage}
-              />
+              <Image source={{ uri: preview.uri }} style={styles.previewImage} />
               <View style={styles.list}>
                 <Text style={styles.small}>
                   Face: {preview.quality.faceDetected ? "ok" : "missing"}
@@ -361,21 +710,16 @@ export default function App() {
                 </Text>
               </View>
               <View style={styles.row}>
-                <TouchableOpacity
-                  style={styles.btnSecondary}
-                  onPress={handleRetake}
-                >
+                <TouchableOpacity style={styles.btnSecondary} onPress={handleRetake}>
                   <Text style={styles.btnTextDark}>Retake</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[
                     styles.btn,
-                    !(
-                      preview.quality.faceDetected &&
+                    !(preview.quality.faceDetected &&
                       preview.quality.poseOk &&
                       preview.quality.blurOk &&
-                      preview.quality.lightOk
-                    ) && styles.btnDisabled,
+                      preview.quality.lightOk) && styles.btnDisabled
                   ]}
                   onPress={handleAcceptPhoto}
                   disabled={
@@ -404,10 +748,7 @@ export default function App() {
                   <Text style={styles.btnText}>Capture</Text>
                 )}
               </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.btnSecondary}
-                onPress={() => setCaptureMode(false)}
-              >
+              <TouchableOpacity style={styles.btnSecondary} onPress={() => setCaptureMode(false)}>
                 <Text style={styles.btnTextDark}>Exit</Text>
               </TouchableOpacity>
             </View>
@@ -425,28 +766,10 @@ export default function App() {
         <Text style={styles.sub}>Remote skin tracking - patient app</Text>
 
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>API Settings</Text>
-          <Text style={styles.body}>Paste a patient token and patient ID.</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="API token"
-            placeholderTextColor="#64748b"
-            value={apiToken}
-            onChangeText={setApiToken}
-            autoCapitalize="none"
-          />
-          <TextInput
-            style={styles.input}
-            placeholder="Patient ID"
-            placeholderTextColor="#64748b"
-            value={patientId}
-            onChangeText={setPatientId}
-            autoCapitalize="none"
-          />
-        </View>
-
-        <View style={styles.card}>
           <Text style={styles.cardTitle}>Capture progress</Text>
+          <Text style={styles.body}>
+            Clinic: {auth.clinicCode ?? "linked"} | Patient: {auth.patientId ?? "-"}
+          </Text>
           <View style={styles.row}>
             {ANGLES.map((angle) => (
               <View key={angle.key} style={styles.pill}>
@@ -464,8 +787,7 @@ export default function App() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Upload scan set</Text>
           <Text style={styles.body}>
-            Uses signed URLs, retries failed uploads, and triggers server
-            checks.
+            Uses signed URLs, retries failed uploads, and triggers server checks.
           </Text>
           <TouchableOpacity
             style={[styles.btn, !allCaptured && styles.btnDisabled]}
@@ -473,19 +795,23 @@ export default function App() {
             disabled={!allCaptured || uploadState.status === "uploading"}
           >
             <Text style={styles.btnText}>
-              {uploadState.status === "uploading"
-                ? "Uploading..."
-                : "Upload scans"}
+              {uploadState.status === "uploading" ? "Uploading..." : "Upload scans"}
             </Text>
           </TouchableOpacity>
-          {uploadState.message ? (
-            <Text style={styles.small}>{uploadState.message}</Text>
-          ) : null}
+          {uploadState.message ? <Text style={styles.small}>{uploadState.message}</Text> : null}
           {uploadState.completed !== undefined && uploadState.total ? (
             <Text style={styles.small}>
               {uploadState.completed}/{uploadState.total} uploaded
             </Text>
           ) : null}
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Account</Text>
+          <Text style={styles.body}>Signed in as {auth.identifier ?? "patient"}.</Text>
+          <TouchableOpacity style={styles.btnSecondary} onPress={handleLogout}>
+            <Text style={styles.btnTextDark}>Sign out</Text>
+          </TouchableOpacity>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -495,20 +821,20 @@ export default function App() {
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: "#0b1220",
+    backgroundColor: "#0b1220"
   },
   container: {
     padding: 20,
-    gap: 14,
+    gap: 14
   },
   title: {
     color: "#e2e8f0",
     fontSize: 28,
-    fontWeight: "700",
+    fontWeight: "700"
   },
   sub: {
     color: "#94a3b8",
-    marginBottom: 8,
+    marginBottom: 8
   },
   card: {
     backgroundColor: "rgba(255,255,255,0.04)",
@@ -516,48 +842,48 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 14,
     padding: 16,
-    gap: 10,
+    gap: 10
   },
   cardTitle: {
     color: "#e2e8f0",
     fontSize: 18,
-    fontWeight: "700",
+    fontWeight: "700"
   },
   body: {
-    color: "#cbd5e1",
+    color: "#cbd5e1"
   },
   row: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 8,
+    gap: 8
   },
   pill: {
     paddingVertical: 8,
     paddingHorizontal: 12,
     backgroundColor: "rgba(255,255,255,0.08)",
-    borderRadius: 999,
+    borderRadius: 999
   },
   pillText: {
     color: "#e2e8f0",
-    fontWeight: "600",
+    fontWeight: "600"
   },
   list: {
-    gap: 6,
+    gap: 6
   },
   btn: {
     marginTop: 8,
     paddingVertical: 12,
     borderRadius: 10,
     backgroundColor: "#2fd2a1",
-    alignItems: "center",
+    alignItems: "center"
   },
   btnDisabled: {
-    opacity: 0.5,
+    opacity: 0.5
   },
   btnText: {
     color: "#0b1220",
     textAlign: "center",
-    fontWeight: "700",
+    fontWeight: "700"
   },
   btnSecondary: {
     paddingVertical: 12,
@@ -566,15 +892,27 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(47, 210, 161, 0.5)",
     paddingHorizontal: 16,
+    alignItems: "center"
   },
   btnTextDark: {
     color: "#2fd2a1",
     textAlign: "center",
-    fontWeight: "700",
+    fontWeight: "700"
+  },
+  linkBtn: {
+    marginTop: 6,
+    alignItems: "center"
+  },
+  linkText: {
+    color: "#9fb1c7",
+    textDecorationLine: "underline"
   },
   small: {
     color: "#94a3b8",
-    fontSize: 13,
+    fontSize: 13
+  },
+  errorText: {
+    color: "#ffb340"
   },
   input: {
     borderRadius: 10,
@@ -582,14 +920,14 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.16)",
     paddingVertical: 10,
     paddingHorizontal: 12,
-    color: "#e2e8f0",
+    color: "#e2e8f0"
   },
   cameraScreen: {
     flex: 1,
-    backgroundColor: "#0b1220",
+    backgroundColor: "#0b1220"
   },
   camera: {
-    flex: 1,
+    flex: 1
   },
   cameraOverlay: {
     position: "absolute",
@@ -598,17 +936,17 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     padding: 20,
-    justifyContent: "space-between",
+    justifyContent: "space-between"
   },
   cameraHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "center",
+    alignItems: "center"
   },
   cameraTitle: {
     color: "#e2e8f0",
     fontSize: 20,
-    fontWeight: "700",
+    fontWeight: "700"
   },
   guide: {
     alignSelf: "center",
@@ -616,43 +954,49 @@ const styles = StyleSheet.create({
     height: 320,
     borderRadius: 16,
     borderWidth: 2,
-    borderColor: "rgba(255,255,255,0.6)",
+    borderColor: "rgba(255,255,255,0.6)"
   },
   captureControls: {
     alignItems: "center",
-    gap: 12,
+    gap: 12
   },
   captureBtn: {
     paddingVertical: 14,
     paddingHorizontal: 32,
     borderRadius: 999,
-    backgroundColor: "#2fd2a1",
+    backgroundColor: "#2fd2a1"
   },
   qualityRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 8
   },
   dot: {
     width: 10,
     height: 10,
-    borderRadius: 999,
+    borderRadius: 999
   },
   dotOk: {
-    backgroundColor: "#2fd2a1",
+    backgroundColor: "#2fd2a1"
   },
   dotWarn: {
-    backgroundColor: "#ffb340",
+    backgroundColor: "#ffb340"
   },
   previewCard: {
     backgroundColor: "rgba(11, 18, 32, 0.9)",
     borderRadius: 14,
     padding: 16,
-    gap: 12,
+    gap: 12
   },
   previewImage: {
     width: "100%",
     height: 240,
-    borderRadius: 12,
+    borderRadius: 12
   },
+  center: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 12
+  }
 });

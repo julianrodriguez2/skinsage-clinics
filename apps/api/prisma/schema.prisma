@@ -122,12 +122,16 @@ model ScanImage {
   scanId     String
   scan       Scan       @relation(fields: [scanId], references: [id])
   angle      ScanAngle
+  storageKey String?
   url        String?
   blurScore  Float?
   lightScore Float?
   poseOk     Boolean?
+  landmarks  Json?
   checksum   String?
   createdAt  DateTime   @default(now())
+
+  @@unique([scanId, angle])
 }
 
 model Appointment {

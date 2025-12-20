@@ -1,13 +1,15 @@
 import { z } from "zod";
 import { ScanAngle } from "./types";
 
-export const REQUIRED_ANGLES: ScanAngle[] = [
+export const scanAngleSchema = z.enum([
   "front",
   "left",
   "right",
   "left45",
   "right45"
-];
+]);
+
+export const REQUIRED_ANGLES = scanAngleSchema.options as ScanAngle[];
 
 export const loginSchema = z.object({
   identifier: z.string().min(3, "Email or phone required"),
@@ -36,7 +38,7 @@ export const scanCreateSchema = z.object({
   angles: z
     .array(
       z.object({
-        angle: z.custom<ScanAngle>(),
+        angle: scanAngleSchema,
         checksum: z.string().optional()
       })
     )
@@ -47,4 +49,16 @@ export const scanStatusSchema = z.object({
   status: z.enum(["pending", "processing", "complete", "rejected"]),
   qualityFlags: z.array(z.string()).optional(),
   notes: z.string().optional()
+});
+
+export const scanUploadSchema = z.object({
+  angles: z
+    .array(
+      z.object({
+        angle: scanAngleSchema,
+        checksum: z.string().optional(),
+        contentType: z.string().min(3)
+      })
+    )
+    .nonempty()
 });

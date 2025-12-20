@@ -5,6 +5,14 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "platforms": ["ios", "android"],
-    "assetBundlePatterns": ["**/*"]
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow SkinSage to access the camera for facial scans."
+      }
+    },
+    "android": {
+      "permissions": ["CAMERA"]
+    }
   }
 }

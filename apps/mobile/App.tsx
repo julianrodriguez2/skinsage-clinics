@@ -13,17 +13,18 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  View
+  View,
 } from "react-native";
 
-const API_BASE = process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
+const API_BASE =
+  process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:4000";
 
 const ANGLES = [
   { key: "front", label: "Front", yaw: { min: -10, max: 10 } },
   { key: "left45", label: "45 deg Left", yaw: { min: -40, max: -15 } },
   { key: "left", label: "Left", yaw: { min: -65, max: -35 } },
   { key: "right45", label: "45 deg Right", yaw: { min: 15, max: 40 } },
-  { key: "right", label: "Right", yaw: { min: 35, max: 65 } }
+  { key: "right", label: "Right", yaw: { min: 35, max: 65 } },
 ] as const;
 
 type AngleKey = (typeof ANGLES)[number]["key"];
@@ -61,20 +62,21 @@ function yawInRange(angle: AngleKey, yaw: number) {
 
 async function digestFile(uri: string) {
   const base64 = await FileSystem.readAsStringAsync(uri, {
-    encoding: FileSystem.EncodingType.Base64
+    encoding: FileSystem.EncodingType.Base64,
   });
-  return Crypto.digestStringAsync(
-    Crypto.CryptoDigestAlgorithm.SHA256,
-    base64,
-    { encoding: Crypto.CryptoEncoding.BASE64 }
-  );
+  return Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, base64, {
+    encoding: Crypto.CryptoEncoding.BASE64,
+  });
 }
 
-async function evaluateCapture(uri: string, angle: AngleKey): Promise<CaptureQuality> {
+async function evaluateCapture(
+  uri: string,
+  angle: AngleKey
+): Promise<CaptureQuality> {
   const faces = await FaceDetector.detectFacesAsync(uri, {
     mode: FaceDetector.FaceDetectorMode.fast,
     detectLandmarks: FaceDetector.FaceDetectorLandmarks.none,
-    runClassifications: FaceDetector.FaceDetectorClassifications.none
+    runClassifications: FaceDetector.FaceDetectorClassifications.none,
   });
 
   const face = faces.faces[0];
@@ -83,7 +85,7 @@ async function evaluateCapture(uri: string, angle: AngleKey): Promise<CaptureQua
 
   const fileInfo = await FileSystem.getInfoAsync(uri, { size: true });
   const size = fileInfo.size ?? 0;
-  // Heuristic until native pixel analysis is wired; server runs the definitive checks.
+  // Placeholder until native pixel analysis is wired
   const blurScore = Math.min(1, size / 250000);
   const lightScore = Math.min(1, size / 180000);
   const blurOk = blurScore >= 0.35;
@@ -96,7 +98,7 @@ async function evaluateCapture(uri: string, angle: AngleKey): Promise<CaptureQua
     lightOk,
     blurScore,
     lightScore,
-    yaw
+    yaw,
   };
 }
 
@@ -109,9 +111,9 @@ async function apiPost<T>(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`
+      Authorization: `Bearer ${token}`,
     },
-    body: body ? JSON.stringify(body) : undefined
+    body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
     const text = await res.text();
@@ -136,7 +138,7 @@ async function uploadWithRetry(
       const res = await FileSystem.uploadAsync(uploadUrl, uri, {
         httpMethod: "PUT",
         uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-        headers: { "Content-Type": contentType }
+        headers: { "Content-Type": contentType },
       });
       if (res.status >= 200 && res.status < 300) return;
     } catch (err) {
@@ -159,7 +161,7 @@ export default function App() {
   const [apiToken, setApiToken] = useState("");
   const [patientId, setPatientId] = useState("");
   const [uploadState, setUploadState] = useState<UploadState>({
-    status: "idle"
+    status: "idle",
   });
 
   const currentAngle = ANGLES[currentIndex];
@@ -196,14 +198,14 @@ export default function App() {
     try {
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.85,
-        skipProcessing: true
+        skipProcessing: true,
       });
       const quality = await evaluateCapture(photo.uri, currentAngle.key);
       const capture: CaptureItem = {
         uri: photo.uri,
         angle: currentAngle.key,
         contentType: "image/jpeg",
-        quality
+        quality,
       };
       setPreview(capture);
     } finally {
@@ -234,7 +236,10 @@ export default function App() {
 
   const handleUpload = async () => {
     if (!apiToken || !patientId) {
-      setUploadState({ status: "error", message: "Set API token and patient ID." });
+      setUploadState({
+        status: "error",
+        message: "Set API token and patient ID.",
+      });
       return;
     }
     if (!allCaptured) {
@@ -246,7 +251,7 @@ export default function App() {
       setUploadState({ status: "uploading", message: "Creating scan..." });
       const anglesPayload = ANGLES.map((angle) => ({
         angle: angle.key,
-        checksum: captures[angle.key]?.checksum
+        checksum: captures[angle.key]?.checksum,
       }));
       const scan = await apiPost<{ id: string }>(
         `/patients/${patientId}/scans`,
@@ -254,15 +259,23 @@ export default function App() {
         { angles: anglesPayload }
       );
 
-      setUploadState({ status: "uploading", message: "Requesting upload URLs..." });
+      setUploadState({
+        status: "uploading",
+        message: "Requesting upload URLs...",
+      });
       const uploadUrls = await apiPost<
-        { angle: AngleKey; uploadUrl: string; storageKey: string; url: string }[]
+        {
+          angle: AngleKey;
+          uploadUrl: string;
+          storageKey: string;
+          url: string;
+        }[]
       >(`/scans/${scan.id}/upload-urls`, apiToken, {
         angles: ANGLES.map((angle) => ({
           angle: angle.key,
           checksum: captures[angle.key]?.checksum,
-          contentType: captures[angle.key]?.contentType ?? "image/jpeg"
-        }))
+          contentType: captures[angle.key]?.contentType ?? "image/jpeg",
+        })),
       });
 
       const urlsByAngle = new Map(uploadUrls.map((item) => [item.angle, item]));
@@ -275,9 +288,13 @@ export default function App() {
           status: "uploading",
           message: `Uploading ${angle.label}...`,
           completed,
-          total: ANGLES.length
+          total: ANGLES.length,
         });
-        await uploadWithRetry(capture.uri, upload.uploadUrl, capture.contentType);
+        await uploadWithRetry(
+          capture.uri,
+          upload.uploadUrl,
+          capture.contentType
+        );
         completed += 1;
       }
 
@@ -287,7 +304,7 @@ export default function App() {
     } catch (err) {
       setUploadState({
         status: "error",
-        message: err instanceof Error ? err.message : "Upload failed."
+        message: err instanceof Error ? err.message : "Upload failed.",
       });
     }
   };
@@ -304,7 +321,7 @@ export default function App() {
           faceDetectorSettings={{
             mode: FaceDetector.FaceDetectorMode.fast,
             detectLandmarks: FaceDetector.FaceDetectorLandmarks.none,
-            runClassifications: FaceDetector.FaceDetectorClassifications.none
+            runClassifications: FaceDetector.FaceDetectorClassifications.none,
           }}
         />
         <View style={styles.cameraOverlay}>
@@ -316,14 +333,19 @@ export default function App() {
           </View>
           <View style={styles.guide} />
           <View style={styles.qualityRow}>
-            <View style={[styles.dot, livePoseOk ? styles.dotOk : styles.dotWarn]} />
+            <View
+              style={[styles.dot, livePoseOk ? styles.dotOk : styles.dotWarn]}
+            />
             <Text style={styles.small}>
               {liveYaw === null ? "Face not detected" : "Pose aligned"}
             </Text>
           </View>
           {preview ? (
             <View style={styles.previewCard}>
-              <Image source={{ uri: preview.uri }} style={styles.previewImage} />
+              <Image
+                source={{ uri: preview.uri }}
+                style={styles.previewImage}
+              />
               <View style={styles.list}>
                 <Text style={styles.small}>
                   Face: {preview.quality.faceDetected ? "ok" : "missing"}
@@ -339,16 +361,21 @@ export default function App() {
                 </Text>
               </View>
               <View style={styles.row}>
-                <TouchableOpacity style={styles.btnSecondary} onPress={handleRetake}>
+                <TouchableOpacity
+                  style={styles.btnSecondary}
+                  onPress={handleRetake}
+                >
                   <Text style={styles.btnTextDark}>Retake</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[
                     styles.btn,
-                    !(preview.quality.faceDetected &&
+                    !(
+                      preview.quality.faceDetected &&
                       preview.quality.poseOk &&
                       preview.quality.blurOk &&
-                      preview.quality.lightOk) && styles.btnDisabled
+                      preview.quality.lightOk
+                    ) && styles.btnDisabled,
                   ]}
                   onPress={handleAcceptPhoto}
                   disabled={
@@ -377,7 +404,10 @@ export default function App() {
                   <Text style={styles.btnText}>Capture</Text>
                 )}
               </TouchableOpacity>
-              <TouchableOpacity style={styles.btnSecondary} onPress={() => setCaptureMode(false)}>
+              <TouchableOpacity
+                style={styles.btnSecondary}
+                onPress={() => setCaptureMode(false)}
+              >
                 <Text style={styles.btnTextDark}>Exit</Text>
               </TouchableOpacity>
             </View>
@@ -434,7 +464,8 @@ export default function App() {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Upload scan set</Text>
           <Text style={styles.body}>
-            Uses signed URLs, retries failed uploads, and triggers server checks.
+            Uses signed URLs, retries failed uploads, and triggers server
+            checks.
           </Text>
           <TouchableOpacity
             style={[styles.btn, !allCaptured && styles.btnDisabled]}
@@ -442,10 +473,14 @@ export default function App() {
             disabled={!allCaptured || uploadState.status === "uploading"}
           >
             <Text style={styles.btnText}>
-              {uploadState.status === "uploading" ? "Uploading..." : "Upload scans"}
+              {uploadState.status === "uploading"
+                ? "Uploading..."
+                : "Upload scans"}
             </Text>
           </TouchableOpacity>
-          {uploadState.message ? <Text style={styles.small}>{uploadState.message}</Text> : null}
+          {uploadState.message ? (
+            <Text style={styles.small}>{uploadState.message}</Text>
+          ) : null}
           {uploadState.completed !== undefined && uploadState.total ? (
             <Text style={styles.small}>
               {uploadState.completed}/{uploadState.total} uploaded
@@ -460,20 +495,20 @@ export default function App() {
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
-    backgroundColor: "#0b1220"
+    backgroundColor: "#0b1220",
   },
   container: {
     padding: 20,
-    gap: 14
+    gap: 14,
   },
   title: {
     color: "#e2e8f0",
     fontSize: 28,
-    fontWeight: "700"
+    fontWeight: "700",
   },
   sub: {
     color: "#94a3b8",
-    marginBottom: 8
+    marginBottom: 8,
   },
   card: {
     backgroundColor: "rgba(255,255,255,0.04)",
@@ -481,48 +516,48 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 14,
     padding: 16,
-    gap: 10
+    gap: 10,
   },
   cardTitle: {
     color: "#e2e8f0",
     fontSize: 18,
-    fontWeight: "700"
+    fontWeight: "700",
   },
   body: {
-    color: "#cbd5e1"
+    color: "#cbd5e1",
   },
   row: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 8
+    gap: 8,
   },
   pill: {
     paddingVertical: 8,
     paddingHorizontal: 12,
     backgroundColor: "rgba(255,255,255,0.08)",
-    borderRadius: 999
+    borderRadius: 999,
   },
   pillText: {
     color: "#e2e8f0",
-    fontWeight: "600"
+    fontWeight: "600",
   },
   list: {
-    gap: 6
+    gap: 6,
   },
   btn: {
     marginTop: 8,
     paddingVertical: 12,
     borderRadius: 10,
     backgroundColor: "#2fd2a1",
-    alignItems: "center"
+    alignItems: "center",
   },
   btnDisabled: {
-    opacity: 0.5
+    opacity: 0.5,
   },
   btnText: {
     color: "#0b1220",
     textAlign: "center",
-    fontWeight: "700"
+    fontWeight: "700",
   },
   btnSecondary: {
     paddingVertical: 12,
@@ -530,16 +565,16 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(47, 210, 161, 0.15)",
     borderWidth: 1,
     borderColor: "rgba(47, 210, 161, 0.5)",
-    paddingHorizontal: 16
+    paddingHorizontal: 16,
   },
   btnTextDark: {
     color: "#2fd2a1",
     textAlign: "center",
-    fontWeight: "700"
+    fontWeight: "700",
   },
   small: {
     color: "#94a3b8",
-    fontSize: 13
+    fontSize: 13,
   },
   input: {
     borderRadius: 10,
@@ -547,14 +582,14 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.16)",
     paddingVertical: 10,
     paddingHorizontal: 12,
-    color: "#e2e8f0"
+    color: "#e2e8f0",
   },
   cameraScreen: {
     flex: 1,
-    backgroundColor: "#0b1220"
+    backgroundColor: "#0b1220",
   },
   camera: {
-    flex: 1
+    flex: 1,
   },
   cameraOverlay: {
     position: "absolute",
@@ -563,17 +598,17 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     padding: 20,
-    justifyContent: "space-between"
+    justifyContent: "space-between",
   },
   cameraHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "center"
+    alignItems: "center",
   },
   cameraTitle: {
     color: "#e2e8f0",
     fontSize: 20,
-    fontWeight: "700"
+    fontWeight: "700",
   },
   guide: {
     alignSelf: "center",
@@ -581,43 +616,43 @@ const styles = StyleSheet.create({
     height: 320,
     borderRadius: 16,
     borderWidth: 2,
-    borderColor: "rgba(255,255,255,0.6)"
+    borderColor: "rgba(255,255,255,0.6)",
   },
   captureControls: {
     alignItems: "center",
-    gap: 12
+    gap: 12,
   },
   captureBtn: {
     paddingVertical: 14,
     paddingHorizontal: 32,
     borderRadius: 999,
-    backgroundColor: "#2fd2a1"
+    backgroundColor: "#2fd2a1",
   },
   qualityRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8
+    gap: 8,
   },
   dot: {
     width: 10,
     height: 10,
-    borderRadius: 999
+    borderRadius: 999,
   },
   dotOk: {
-    backgroundColor: "#2fd2a1"
+    backgroundColor: "#2fd2a1",
   },
   dotWarn: {
-    backgroundColor: "#ffb340"
+    backgroundColor: "#ffb340",
   },
   previewCard: {
     backgroundColor: "rgba(11, 18, 32, 0.9)",
     borderRadius: 14,
     padding: 16,
-    gap: 12
+    gap: 12,
   },
   previewImage: {
     width: "100%",
     height: 240,
-    borderRadius: 12
-  }
+    borderRadius: 12,
+  },
 });

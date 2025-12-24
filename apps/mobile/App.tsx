@@ -27,7 +27,8 @@ const SECURE_KEYS = {
   clinicCode: "skinsage_clinic_code",
   clinicLinked: "skinsage_clinic_linked",
   consent: "skinsage_consent",
-  identifier: "skinsage_identifier"
+  identifier: "skinsage_identifier",
+  role: "skinsage_role"
 };
 
 const ANGLES = [
@@ -39,6 +40,7 @@ const ANGLES = [
 ] as const;
 
 type AngleKey = (typeof ANGLES)[number]["key"];
+type TabKey = "timeline" | "capture" | "compare" | "appointments" | "settings";
 
 type CaptureQuality = {
   faceDetected: boolean;
@@ -73,6 +75,26 @@ type AuthState = {
   clinicLinked: boolean;
   consentAccepted: boolean;
   identifier: string | null;
+  role: string | null;
+};
+
+type ScanImage = {
+  id: string;
+  angle: string;
+  url?: string | null;
+  blurScore?: number | null;
+  lightScore?: number | null;
+  poseOk?: boolean | null;
+  checksum?: string | null;
+};
+
+type Scan = {
+  id: string;
+  capturedAt: string;
+  status: "pending" | "processing" | "complete" | "rejected";
+  qualityFlags: string[];
+  missingAngles: string[];
+  images: ScanImage[];
 };
 
 const initialAuth: AuthState = {
@@ -82,7 +104,8 @@ const initialAuth: AuthState = {
   clinicCode: null,
   clinicLinked: false,
   consentAccepted: false,
-  identifier: null
+  identifier: null,
+  role: null
 };
 
 function yawInRange(angle: AngleKey, yaw: number) {
@@ -119,7 +142,8 @@ async function loadAuthState(): Promise<AuthState> {
     clinicCode,
     clinicLinked,
     consent,
-    identifier
+    identifier,
+    role
   ] = await Promise.all([
     SecureStore.getItemAsync(SECURE_KEYS.token),
     SecureStore.getItemAsync(SECURE_KEYS.refresh),
@@ -127,7 +151,8 @@ async function loadAuthState(): Promise<AuthState> {
     SecureStore.getItemAsync(SECURE_KEYS.clinicCode),
     SecureStore.getItemAsync(SECURE_KEYS.clinicLinked),
     SecureStore.getItemAsync(SECURE_KEYS.consent),
-    SecureStore.getItemAsync(SECURE_KEYS.identifier)
+    SecureStore.getItemAsync(SECURE_KEYS.identifier),
+    SecureStore.getItemAsync(SECURE_KEYS.role)
   ]);
 
   return {
@@ -137,7 +162,8 @@ async function loadAuthState(): Promise<AuthState> {
     clinicCode: clinicCode ?? null,
     clinicLinked: clinicLinked === "true",
     consentAccepted: consent === "true",
-    identifier: identifier ?? null
+    identifier: identifier ?? null,
+    role: role ?? null
   };
 }
 
@@ -149,7 +175,8 @@ async function persistAuthState(state: AuthState) {
     setSecureItem(SECURE_KEYS.clinicCode, state.clinicCode),
     setSecureItem(SECURE_KEYS.clinicLinked, state.clinicLinked ? "true" : null),
     setSecureItem(SECURE_KEYS.consent, state.consentAccepted ? "true" : null),
-    setSecureItem(SECURE_KEYS.identifier, state.identifier)
+    setSecureItem(SECURE_KEYS.identifier, state.identifier),
+    setSecureItem(SECURE_KEYS.role, state.role)
   ]);
 }
 
@@ -191,6 +218,18 @@ async function evaluateCapture(uri: string, angle: AngleKey): Promise<CaptureQua
   };
 }
 
+async function apiGet<T>(path: string, token: string | null): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Request failed: ${res.status}`);
+  }
+  const json = (await res.json()) as { data: T };
+  return json.data;
+}
+
 async function apiPost<T>(
   path: string,
   token: string | null,
@@ -209,7 +248,7 @@ async function apiPost<T>(
     throw new Error(text || `Request failed: ${res.status}`);
   }
   const json = (await res.json()) as { data?: T; token?: string; refreshToken?: string };
-  return (json.data ?? json) as T;
+  return (json.data ?? (json as unknown)) as T;
 }
 
 function delay(ms: number) {
@@ -236,6 +275,11 @@ async function uploadWithRetry(
     await delay(500 * (i + 1));
   }
   throw new Error("Upload failed");
+}
+
+function formatDate(value: string) {
+  const date = new Date(value);
+  return date.toLocaleDateString();
 }
 
 export default function App() {
@@ -266,6 +310,14 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [scannerPermission, setScannerPermission] = useState<boolean | null>(null);
 
+  const [activeTab, setActiveTab] = useState<TabKey>("timeline");
+  const [scans, setScans] = useState<Scan[]>([]);
+  const [scansLoading, setScansLoading] = useState(false);
+  const [scansError, setScansError] = useState<string | null>(null);
+
+  const [compareLeft, setCompareLeft] = useState<Scan | null>(null);
+  const [compareRight, setCompareRight] = useState<Scan | null>(null);
+
   useEffect(() => {
     loadAuthState()
       .then((stored) => {
@@ -287,6 +339,29 @@ export default function App() {
     setAuth(next);
     await persistAuthState(next);
   };
+
+  const refreshScans = useCallback(async () => {
+    if (!authRef.current.token || !authRef.current.patientId) return;
+    setScansLoading(true);
+    setScansError(null);
+    try {
+      const data = await apiGet<Scan[]>(
+        `/patients/${authRef.current.patientId}/scans`,
+        authRef.current.token
+      );
+      setScans(data);
+    } catch (err) {
+      setScansError(err instanceof Error ? err.message : "Failed to load scans.");
+    } finally {
+      setScansLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (auth.token && auth.patientId) {
+      refreshScans();
+    }
+  }, [auth.token, auth.patientId, refreshScans]);
 
   const isAuthed = Boolean(auth.token);
   const clinicReady = auth.clinicLinked;
@@ -414,6 +489,9 @@ export default function App() {
       setUploadState({ status: "uploading", message: "Verifying scan..." });
       await apiPost(`/scans/${scan.id}/ingest`, auth.token, {});
       setUploadState({ status: "done", message: "Upload complete." });
+      setCaptures({});
+      setCurrentIndex(0);
+      refreshScans();
     } catch (err) {
       setUploadState({
         status: "error",
@@ -444,7 +522,8 @@ export default function App() {
         token: response.token,
         refresh: response.refreshToken,
         patientId: response.user.patientId ?? auth.patientId,
-        identifier
+        identifier,
+        role: response.user.role
       });
     } catch (err) {
       setAuthError(err instanceof Error ? err.message : "Login failed.");
@@ -460,6 +539,10 @@ export default function App() {
     }
     if (!patientName.trim()) {
       setJoinError("Enter your full name.");
+      return;
+    }
+    if (auth.role && auth.role !== "patient") {
+      setJoinError("Clinic join is only available for patient accounts.");
       return;
     }
     try {
@@ -483,9 +566,9 @@ export default function App() {
   };
 
   const handleScanQr = async () => {
-    const permission = await BarCodeScanner.requestPermissionsAsync();
-    setScannerPermission(permission.status === "granted");
-    if (permission.status === "granted") {
+    const permissionResult = await BarCodeScanner.requestPermissionsAsync();
+    setScannerPermission(permissionResult.status === "granted");
+    if (permissionResult.status === "granted") {
       setScanning(true);
     }
   };
@@ -515,6 +598,8 @@ export default function App() {
     setCaptures({});
     setCurrentIndex(0);
     setUploadState({ status: "idle" });
+    setActiveTab("timeline");
+    setScans([]);
   };
 
   if (hydrating) {
@@ -568,8 +653,7 @@ export default function App() {
             )}
             {authError ? <Text style={styles.errorText}>{authError}</Text> : null}
             <Text style={styles.small}>
-              Demo: use demo-patient@skinsage.com and OTP from the API test
-              endpoint.
+              Demo: use demo-patient@skinsage.com and OTP from the API test endpoint.
             </Text>
           </View>
         </ScrollView>
@@ -627,12 +711,6 @@ export default function App() {
               <Text style={styles.errorText}>Camera permission is required.</Text>
             ) : null}
             {joinError ? <Text style={styles.errorText}>{joinError}</Text> : null}
-            <TouchableOpacity
-              style={styles.linkBtn}
-              onPress={() => updateAuth({ clinicLinked: true })}
-            >
-              <Text style={styles.linkText}>Skip for now</Text>
-            </TouchableOpacity>
           </View>
         </ScrollView>
       </SafeAreaView>
@@ -761,59 +839,247 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="light" />
-      <ScrollView contentContainerStyle={styles.container}>
-        <Text style={styles.title}>SkinSage Clinical</Text>
-        <Text style={styles.sub}>Remote skin tracking - patient app</Text>
-
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Capture progress</Text>
-          <Text style={styles.body}>
-            Clinic: {auth.clinicCode ?? "linked"} | Patient: {auth.patientId ?? "-"}
-          </Text>
-          <View style={styles.row}>
-            {ANGLES.map((angle) => (
-              <View key={angle.key} style={styles.pill}>
-                <Text style={styles.pillText}>
-                  {angle.label} {captures[angle.key] ? "done" : "pending"}
-                </Text>
-              </View>
-            ))}
+      <View style={styles.shell}>
+        <View style={styles.shellHeader}>
+          <View>
+            <Text style={styles.title}>SkinSage Clinical</Text>
+            <Text style={styles.sub}>Patient app</Text>
           </View>
-          <TouchableOpacity style={styles.btn} onPress={startCapture}>
-            <Text style={styles.btnText}>Open camera</Text>
-          </TouchableOpacity>
+          <View style={styles.pill}>
+            <Text style={styles.pillText}>
+              {auth.clinicCode ? `Clinic ${auth.clinicCode}` : "Clinic linked"}
+            </Text>
+          </View>
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Upload scan set</Text>
-          <Text style={styles.body}>
-            Uses signed URLs, retries failed uploads, and triggers server checks.
-          </Text>
-          <TouchableOpacity
-            style={[styles.btn, !allCaptured && styles.btnDisabled]}
-            onPress={handleUpload}
-            disabled={!allCaptured || uploadState.status === "uploading"}
-          >
-            <Text style={styles.btnText}>
-              {uploadState.status === "uploading" ? "Uploading..." : "Upload scans"}
-            </Text>
-          </TouchableOpacity>
-          {uploadState.message ? <Text style={styles.small}>{uploadState.message}</Text> : null}
-          {uploadState.completed !== undefined && uploadState.total ? (
-            <Text style={styles.small}>
-              {uploadState.completed}/{uploadState.total} uploaded
-            </Text>
+        <View style={styles.shellContent}>
+          {activeTab === "timeline" ? (
+            <ScrollView contentContainerStyle={styles.listGap}>
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Scan timeline</Text>
+                <Text style={styles.body}>Review scan sets and statuses.</Text>
+                <View style={styles.row}>
+                  <TouchableOpacity style={styles.btnSecondary} onPress={refreshScans}>
+                    <Text style={styles.btnTextDark}>Refresh</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.btn} onPress={() => setActiveTab("capture")}>
+                    <Text style={styles.btnText}>New scan</Text>
+                  </TouchableOpacity>
+                </View>
+                {scansLoading ? <Text style={styles.small}>Loading...</Text> : null}
+                {scansError ? <Text style={styles.errorText}>{scansError}</Text> : null}
+                {scans.length ? (
+                  scans.map((scan) => (
+                    <View key={scan.id} style={styles.timelineRow}>
+                      <View>
+                        <Text style={styles.body}>{formatDate(scan.capturedAt)}</Text>
+                        <Text style={styles.small}>
+                          Status: {scan.status} | Missing angles:{" "}
+                          {scan.missingAngles.length}
+                        </Text>
+                        {scan.qualityFlags.length ? (
+                          <Text style={styles.small}>
+                            Flags: {scan.qualityFlags.join(", ")}
+                          </Text>
+                        ) : null}
+                      </View>
+                      <View style={styles.badge}>
+                        <Text style={styles.badgeText}>
+                          {scan.status === "complete" ? "Complete" : "Pending"}
+                        </Text>
+                      </View>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.small}>No scans yet.</Text>
+                )}
+              </View>
+            </ScrollView>
+          ) : null}
+
+          {activeTab === "capture" ? (
+            <ScrollView contentContainerStyle={styles.listGap}>
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Capture set</Text>
+                <Text style={styles.body}>
+                  Capture each required angle with guidance and quality checks.
+                </Text>
+                <View style={styles.row}>
+                  {ANGLES.map((angle) => (
+                    <View key={angle.key} style={styles.pill}>
+                      <Text style={styles.pillText}>
+                        {angle.label} {captures[angle.key] ? "done" : "pending"}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+                <TouchableOpacity style={styles.btn} onPress={startCapture}>
+                  <Text style={styles.btnText}>Open camera</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Upload scan set</Text>
+                <Text style={styles.body}>
+                  Uses signed URLs, retries failed uploads, and triggers server checks.
+                </Text>
+                <TouchableOpacity
+                  style={[styles.btn, !allCaptured && styles.btnDisabled]}
+                  onPress={handleUpload}
+                  disabled={!allCaptured || uploadState.status === "uploading"}
+                >
+                  <Text style={styles.btnText}>
+                    {uploadState.status === "uploading" ? "Uploading..." : "Upload scans"}
+                  </Text>
+                </TouchableOpacity>
+                {uploadState.message ? <Text style={styles.small}>{uploadState.message}</Text> : null}
+                {uploadState.completed !== undefined && uploadState.total ? (
+                  <Text style={styles.small}>
+                    {uploadState.completed}/{uploadState.total} uploaded
+                  </Text>
+                ) : null}
+              </View>
+            </ScrollView>
+          ) : null}
+
+          {activeTab === "compare" ? (
+            <ScrollView contentContainerStyle={styles.listGap}>
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Comparison</Text>
+                <Text style={styles.body}>
+                  Select two scans and compare the front angle.
+                </Text>
+                <View style={styles.row}>
+                  <TouchableOpacity
+                    style={styles.btnSecondary}
+                    onPress={() => {
+                      setCompareLeft(null);
+                      setCompareRight(null);
+                    }}
+                  >
+                    <Text style={styles.btnTextDark}>Clear selection</Text>
+                  </TouchableOpacity>
+                </View>
+                {scans.length ? (
+                  scans.map((scan) => (
+                    <View key={scan.id} style={styles.timelineRow}>
+                      <View>
+                        <Text style={styles.body}>{formatDate(scan.capturedAt)}</Text>
+                        <Text style={styles.small}>Status: {scan.status}</Text>
+                      </View>
+                      <View style={styles.row}>
+                        <TouchableOpacity
+                          style={styles.btnSecondary}
+                          onPress={() => setCompareLeft(scan)}
+                        >
+                          <Text style={styles.btnTextDark}>Set A</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.btnSecondary}
+                          onPress={() => setCompareRight(scan)}
+                        >
+                          <Text style={styles.btnTextDark}>Set B</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.small}>No scans available.</Text>
+                )}
+              </View>
+
+              {compareLeft && compareRight ? (
+                <View style={styles.card}>
+                  <Text style={styles.cardTitle}>Side by side</Text>
+                  <View style={styles.compareRow}>
+                    {[compareLeft, compareRight].map((scan) => {
+                      const front = scan.images.find((img) => img.angle === "front");
+                      return (
+                        <View key={scan.id} style={styles.comparePanel}>
+                          <Text style={styles.small}>{formatDate(scan.capturedAt)}</Text>
+                          {front?.url ? (
+                            <Image source={{ uri: front.url }} style={styles.compareImage} />
+                          ) : (
+                            <View style={styles.placeholder}>
+                              <Text style={styles.small}>No image</Text>
+                            </View>
+                          )}
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              ) : null}
+            </ScrollView>
+          ) : null}
+
+          {activeTab === "appointments" ? (
+            <ScrollView contentContainerStyle={styles.listGap}>
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Appointments</Text>
+                <Text style={styles.body}>
+                  Upcoming visits and preparation instructions will appear here.
+                </Text>
+                <View style={styles.placeholder}>
+                  <Text style={styles.small}>No appointments scheduled.</Text>
+                </View>
+              </View>
+            </ScrollView>
+          ) : null}
+
+          {activeTab === "settings" ? (
+            <ScrollView contentContainerStyle={styles.listGap}>
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Profile</Text>
+                <Text style={styles.body}>Identifier: {auth.identifier ?? "-"}</Text>
+                <Text style={styles.body}>Role: {auth.role ?? "-"}</Text>
+                <Text style={styles.body}>Patient ID: {auth.patientId ?? "-"}</Text>
+                <Text style={styles.body}>Clinic code: {auth.clinicCode ?? "-"}</Text>
+              </View>
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Consent</Text>
+                <Text style={styles.body}>
+                  You can revoke consent and re-accept later.
+                </Text>
+                <TouchableOpacity
+                  style={styles.btnSecondary}
+                  onPress={() => updateAuth({ consentAccepted: false })}
+                >
+                  <Text style={styles.btnTextDark}>Revoke consent</Text>
+                </TouchableOpacity>
+              </View>
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Account</Text>
+                <TouchableOpacity style={styles.btnSecondary} onPress={handleLogout}>
+                  <Text style={styles.btnTextDark}>Sign out</Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
           ) : null}
         </View>
 
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Account</Text>
-          <Text style={styles.body}>Signed in as {auth.identifier ?? "patient"}.</Text>
-          <TouchableOpacity style={styles.btnSecondary} onPress={handleLogout}>
-            <Text style={styles.btnTextDark}>Sign out</Text>
-          </TouchableOpacity>
+        <View style={styles.tabBar}>
+          {(
+            [
+              { key: "timeline", label: "Timeline" },
+              { key: "capture", label: "Capture" },
+              { key: "compare", label: "Compare" },
+              { key: "appointments", label: "Appointments" },
+              { key: "settings", label: "Settings" }
+            ] as const
+          ).map((tab) => (
+            <TouchableOpacity
+              key={tab.key}
+              style={[styles.tabItem, activeTab === tab.key && styles.tabItemActive]}
+              onPress={() => setActiveTab(tab.key)}
+            >
+              <Text style={activeTab === tab.key ? styles.tabTextActive : styles.tabText}>
+                {tab.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </View>
-      </ScrollView>
+      </View>
     </SafeAreaView>
   );
 }
@@ -823,13 +1089,52 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#0b1220"
   },
+  shell: {
+    flex: 1,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 12
+  },
+  shellHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12
+  },
+  shellContent: {
+    flex: 1
+  },
+  tabBar: {
+    flexDirection: "row",
+    gap: 6,
+    paddingTop: 10
+  },
+  tabItem: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.05)",
+    alignItems: "center"
+  },
+  tabItemActive: {
+    backgroundColor: "#2fd2a1"
+  },
+  tabText: {
+    color: "#9fb1c7",
+    fontSize: 12
+  },
+  tabTextActive: {
+    color: "#0b1220",
+    fontSize: 12,
+    fontWeight: "700"
+  },
   container: {
     padding: 20,
     gap: 14
   },
   title: {
     color: "#e2e8f0",
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: "700"
   },
   sub: {
@@ -857,18 +1162,33 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     gap: 8
   },
+  list: {
+    gap: 6
+  },
+  listGap: {
+    gap: 12,
+    paddingBottom: 12
+  },
   pill: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
     backgroundColor: "rgba(255,255,255,0.08)",
     borderRadius: 999
   },
   pillText: {
     color: "#e2e8f0",
-    fontWeight: "600"
+    fontWeight: "600",
+    fontSize: 12
   },
-  list: {
-    gap: 6
+  badge: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: "rgba(47, 210, 161, 0.2)"
+  },
+  badgeText: {
+    color: "#a2f4da",
+    fontSize: 12
   },
   btn: {
     marginTop: 8,
@@ -899,17 +1219,9 @@ const styles = StyleSheet.create({
     textAlign: "center",
     fontWeight: "700"
   },
-  linkBtn: {
-    marginTop: 6,
-    alignItems: "center"
-  },
-  linkText: {
-    color: "#9fb1c7",
-    textDecorationLine: "underline"
-  },
   small: {
     color: "#94a3b8",
-    fontSize: 13
+    fontSize: 12
   },
   errorText: {
     color: "#ffb340"
@@ -998,5 +1310,35 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 12
+  },
+  timelineRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+    borderBottomColor: "rgba(255,255,255,0.08)",
+    borderBottomWidth: 1
+  },
+  compareRow: {
+    flexDirection: "row",
+    gap: 12
+  },
+  comparePanel: {
+    flex: 1,
+    gap: 8
+  },
+  compareImage: {
+    width: "100%",
+    height: 220,
+    borderRadius: 12
+  },
+  placeholder: {
+    height: 220,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    alignItems: "center",
+    justifyContent: "center"
   }
 });

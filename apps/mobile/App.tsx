@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Image,
+  PanResponder,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -317,6 +318,33 @@ export default function App() {
 
   const [compareLeft, setCompareLeft] = useState<Scan | null>(null);
   const [compareRight, setCompareRight] = useState<Scan | null>(null);
+  const [expandedScanId, setExpandedScanId] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [panEnabled, setPanEnabled] = useState(true);
+  const panOffset = useRef({ x: 0, y: 0 });
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: () => panEnabled,
+        onPanResponderMove: (_evt, gesture) => {
+          if (!panEnabled) return;
+          setPan({
+            x: panOffset.current.x + gesture.dx,
+            y: panOffset.current.y + gesture.dy
+          });
+        },
+        onPanResponderRelease: (_evt, gesture) => {
+          if (!panEnabled) return;
+          panOffset.current = {
+            x: panOffset.current.x + gesture.dx,
+            y: panOffset.current.y + gesture.dy
+          };
+          setPan({ x: panOffset.current.x, y: panOffset.current.y });
+        }
+      }),
+    [panEnabled]
+  );
 
   useEffect(() => {
     loadAuthState()
@@ -369,6 +397,13 @@ export default function App() {
 
   const currentAngle = ANGLES[currentIndex];
   const allCaptured = ANGLES.every((angle) => captures[angle.key]);
+  const canCompare = Boolean(compareLeft && compareRight);
+  const transformStyle = useMemo(
+    () => ({
+      transform: [{ translateX: pan.x }, { translateY: pan.y }, { scale: zoom }]
+    }),
+    [pan.x, pan.y, zoom]
+  );
 
   const livePoseOk = useMemo(() => {
     if (liveYaw === null) return false;
@@ -601,6 +636,25 @@ export default function App() {
     setActiveTab("timeline");
     setScans([]);
   };
+
+  const adjustZoom = useCallback((delta: number) => {
+    setZoom((current) => {
+      const next = Math.max(1, Math.min(3, Math.round((current + delta) * 10) / 10));
+      return next;
+    });
+  }, []);
+
+  const resetPanZoom = useCallback(() => {
+    panOffset.current = { x: 0, y: 0 };
+    setPan({ x: 0, y: 0 });
+    setZoom(1);
+  }, []);
+
+  useEffect(() => {
+    if (compareLeft || compareRight) {
+      resetPanZoom();
+    }
+  }, [compareLeft?.id, compareRight?.id, resetPanZoom]);
 
   if (hydrating) {
     return (
@@ -870,24 +924,52 @@ export default function App() {
                 {scansError ? <Text style={styles.errorText}>{scansError}</Text> : null}
                 {scans.length ? (
                   scans.map((scan) => (
-                    <View key={scan.id} style={styles.timelineRow}>
-                      <View>
-                        <Text style={styles.body}>{formatDate(scan.capturedAt)}</Text>
-                        <Text style={styles.small}>
-                          Status: {scan.status} | Missing angles:{" "}
-                          {scan.missingAngles.length}
-                        </Text>
-                        {scan.qualityFlags.length ? (
+                    <View key={scan.id} style={styles.timelineBlock}>
+                      <TouchableOpacity
+                        style={styles.timelineRow}
+                        onPress={() =>
+                          setExpandedScanId((prev) => (prev === scan.id ? null : scan.id))
+                        }
+                      >
+                        <View>
+                          <Text style={styles.body}>{formatDate(scan.capturedAt)}</Text>
                           <Text style={styles.small}>
-                            Flags: {scan.qualityFlags.join(", ")}
+                            Status: {scan.status} | Missing angles:{" "}
+                            {scan.missingAngles.length}
                           </Text>
-                        ) : null}
-                      </View>
-                      <View style={styles.badge}>
-                        <Text style={styles.badgeText}>
-                          {scan.status === "complete" ? "Complete" : "Pending"}
-                        </Text>
-                      </View>
+                          {scan.qualityFlags.length ? (
+                            <Text style={styles.small}>
+                              Flags: {scan.qualityFlags.join(", ")}
+                            </Text>
+                          ) : null}
+                          <Text style={styles.small}>
+                            Tap to {expandedScanId === scan.id ? "collapse" : "view"} images
+                          </Text>
+                        </View>
+                        <View style={styles.badge}>
+                          <Text style={styles.badgeText}>
+                            {scan.status === "complete" ? "Complete" : "Pending"}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                      {expandedScanId === scan.id ? (
+                        <View style={styles.scanDetail}>
+                          <View style={styles.imageGrid}>
+                            {scan.images.map((image) => (
+                              <View key={image.id} style={styles.thumbCard}>
+                                {image.url ? (
+                                  <Image source={{ uri: image.url }} style={styles.thumbImage} />
+                                ) : (
+                                  <View style={styles.thumbPlaceholder}>
+                                    <Text style={styles.small}>No image</Text>
+                                  </View>
+                                )}
+                                <Text style={styles.small}>{image.angle}</Text>
+                              </View>
+                            ))}
+                          </View>
+                        </View>
+                      ) : null}
                     </View>
                   ))
                 ) : (
@@ -955,10 +1037,31 @@ export default function App() {
                     onPress={() => {
                       setCompareLeft(null);
                       setCompareRight(null);
+                      resetPanZoom();
                     }}
                   >
                     <Text style={styles.btnTextDark}>Clear selection</Text>
                   </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.btnSecondary}
+                    onPress={() => setPanEnabled((prev) => !prev)}
+                  >
+                    <Text style={styles.btnTextDark}>
+                      {panEnabled ? "Pan: on" : "Pan: off"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.row}>
+                  <TouchableOpacity style={styles.btnSecondary} onPress={() => adjustZoom(-0.1)}>
+                    <Text style={styles.btnTextDark}>-</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.btnSecondary} onPress={() => adjustZoom(0.1)}>
+                    <Text style={styles.btnTextDark}>+</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.btnSecondary} onPress={resetPanZoom}>
+                    <Text style={styles.btnTextDark}>Reset</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.small}>Zoom: {zoom.toFixed(1)}x</Text>
                 </View>
                 {scans.length ? (
                   scans.map((scan) => (
@@ -972,13 +1075,17 @@ export default function App() {
                           style={styles.btnSecondary}
                           onPress={() => setCompareLeft(scan)}
                         >
-                          <Text style={styles.btnTextDark}>Set A</Text>
+                          <Text style={styles.btnTextDark}>
+                            {compareLeft?.id === scan.id ? "A selected" : "Set A"}
+                          </Text>
                         </TouchableOpacity>
                         <TouchableOpacity
                           style={styles.btnSecondary}
                           onPress={() => setCompareRight(scan)}
                         >
-                          <Text style={styles.btnTextDark}>Set B</Text>
+                          <Text style={styles.btnTextDark}>
+                            {compareRight?.id === scan.id ? "B selected" : "Set B"}
+                          </Text>
                         </TouchableOpacity>
                       </View>
                     </View>
@@ -988,26 +1095,34 @@ export default function App() {
                 )}
               </View>
 
-              {compareLeft && compareRight ? (
+              {canCompare ? (
                 <View style={styles.card}>
                   <Text style={styles.cardTitle}>Side by side</Text>
-                  <View style={styles.compareRow}>
-                    {[compareLeft, compareRight].map((scan) => {
-                      const front = scan.images.find((img) => img.angle === "front");
-                      return (
-                        <View key={scan.id} style={styles.comparePanel}>
-                          <Text style={styles.small}>{formatDate(scan.capturedAt)}</Text>
-                          {front?.url ? (
-                            <Image source={{ uri: front.url }} style={styles.compareImage} />
-                          ) : (
-                            <View style={styles.placeholder}>
-                              <Text style={styles.small}>No image</Text>
-                            </View>
-                          )}
-                        </View>
-                      );
-                    })}
+                  <View style={styles.compareStage} {...panResponder.panHandlers}>
+                    <View style={styles.compareRow}>
+                      {[compareLeft, compareRight].map((scan) => {
+                        const front = scan.images.find((img) => img.angle === "front");
+                        return (
+                          <View key={scan.id} style={styles.comparePanel}>
+                            <Text style={styles.small}>{formatDate(scan.capturedAt)}</Text>
+                            {front?.url ? (
+                              <Image
+                                source={{ uri: front.url }}
+                                style={[styles.compareImage, transformStyle]}
+                              />
+                            ) : (
+                              <View style={styles.placeholder}>
+                                <Text style={styles.small}>No image</Text>
+                              </View>
+                            )}
+                          </View>
+                        );
+                      })}
+                    </View>
                   </View>
+                  <Text style={styles.small}>
+                    Drag to pan (if enabled). Zoom and pan are synced across both images.
+                  </Text>
                 </View>
               ) : null}
             </ScrollView>
@@ -1319,13 +1434,51 @@ const styles = StyleSheet.create({
     borderBottomColor: "rgba(255,255,255,0.08)",
     borderBottomWidth: 1
   },
+  timelineBlock: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    paddingHorizontal: 12,
+    marginTop: 10
+  },
+  scanDetail: {
+    paddingBottom: 12
+  },
+  imageGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10
+  },
+  thumbCard: {
+    width: "48%",
+    gap: 6
+  },
+  thumbImage: {
+    width: "100%",
+    height: 120,
+    borderRadius: 10
+  },
+  thumbPlaceholder: {
+    height: 120,
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.04)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.08)",
+    alignItems: "center",
+    justifyContent: "center"
+  },
   compareRow: {
     flexDirection: "row",
     gap: 12
   },
+  compareStage: {
+    borderRadius: 12,
+    overflow: "hidden"
+  },
   comparePanel: {
     flex: 1,
-    gap: 8
+    gap: 8,
+    overflow: "hidden"
   },
   compareImage: {
     width: "100%",
